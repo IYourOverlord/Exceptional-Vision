@@ -1,0 +1,106 @@
+#version 460 core
+// Frustum + LOD-level culling. One invocation per node in NodeBuffer.
+// See 04_gpu_pipeline.md ("Compute Culling Shader") and NodeData.java / PackedQuad.java
+// for the buffer layouts this must match exactly.
+//
+// Stage-4 scope note: this is the "basic" GPU pipeline path — the draw count this
+// shader produces is read back to the CPU (see LodGpuPipeline#renderLodFrame) and used
+// as an explicit count for glMultiDrawArraysIndirect, rather than the fully
+// GPU-resident glMultiDrawArraysIndirectCount path (that's stage 5).
+
+layout(local_size_x = 64) in;
+
+struct NodeData {
+    vec4 aabbMin;   // xyz = world min corner, w = lodLevel (as float, redundant with the uint below - kept for parity with NodeData.java's on-disk layout)
+    vec4 aabbMax;   // xyz = world max corner, w unused
+    uint quadOffset;
+    uint quadCount;
+    uint lodLevel;
+    uint _pad;
+};
+
+struct DrawArraysIndirectCommand {
+    uint count;
+    uint instanceCount;
+    uint first;
+    uint baseInstance;
+};
+
+layout(std430, binding = 0) readonly buffer NodeBuffer {
+    NodeData nodes[];
+};
+
+layout(std430, binding = 3) writeonly buffer VisibleNodeIndices {
+    uint visibleNodeIndices[];
+};
+
+layout(std430, binding = 4) writeonly buffer IndirectCommands {
+    DrawArraysIndirectCommand commands[];
+};
+
+layout(std430, binding = 5) buffer DrawCounter {
+    uint drawCount;
+};
+
+uniform vec4 frustumPlanes[6];  // xyz = normal (points INTO the frustum), w = distance; see FrustumExtractor.java
+uniform vec3 cameraWorldPos;
+uniform float baseLodDistance;  // distance (blocks) at which level-0 nodes give way to level-1; doubles per level
+uniform uint nodeCount;
+uniform uint maxLodLevel;       // see LodBuilder.MAX_LEVEL (5) - the region-root level, drawn at any distance beyond its band
+uniform uint maxDrawCommands;   // capacity of VisibleNodeIndices / IndirectCommands - see LodGpuBuffers
+
+bool aabbInFrustum(vec3 mn, vec3 mx) {
+    for (int i = 0; i < 6; i++) {
+        // Gribb/Hartmann "positive vertex" test: pick the AABB corner furthest along each
+        // plane's normal, reject if even that corner is outside.
+        vec3 p = mix(mn, mx, greaterThan(frustumPlanes[i].xyz, vec3(0.0)));
+        if (dot(frustumPlanes[i].xyz, p) + frustumPlanes[i].w < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Simple distance-band LOD selection: level L is the appropriate detail level within
+// [baseLodDistance * 2^(L-1), baseLodDistance * 2^L) from the camera (level 0 starts at
+// distance 0). This is a deliberately simple placeholder policy for the "basic" stage-4
+// pipeline - a real screen-space-error metric is stage-5 territory.
+bool lodLevelAppropriate(NodeData node) {
+    vec3 center = 0.5 * (node.aabbMin.xyz + node.aabbMax.xyz);
+    float dist = distance(cameraWorldPos, center);
+    float minDist = node.lodLevel == 0u ? 0.0 : baseLodDistance * float(1u << (node.lodLevel - 1u));
+    if (node.lodLevel >= maxLodLevel) {
+        return dist >= minDist; // top level covers everything beyond its band, no upper bound
+    }
+    float maxDist = baseLodDistance * float(1u << node.lodLevel);
+    return dist >= minDist && dist < maxDist;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= nodeCount) {
+        return;
+    }
+
+    NodeData node = nodes[idx];
+    if (node.quadCount == 0u) {
+        return;
+    }
+    if (!lodLevelAppropriate(node)) {
+        return;
+    }
+    if (!aabbInFrustum(node.aabbMin.xyz, node.aabbMax.xyz)) {
+        return;
+    }
+
+    uint slot = atomicAdd(drawCount, 1u);
+    if (slot >= maxDrawCommands) {
+        return; // buffers sized for nodeCount worst-case (see LodGpuBuffers) - this should not happen, defensive only
+    }
+
+    visibleNodeIndices[slot] = idx;
+    commands[slot].count = node.quadCount * 6u;
+    commands[slot].instanceCount = 1u;
+    commands[slot].first = node.quadOffset * 6u;
+    commands[slot].baseInstance = 0u;
+}
