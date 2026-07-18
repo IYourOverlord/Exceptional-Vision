@@ -91,6 +91,16 @@ public final class LodGpuBuffers implements AutoCloseable {
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     }
 
+    /**
+     * Marks the currently-uploaded data as empty without touching any GL objects -
+     * cheap way to stop drawing stale geometry (e.g. when leaving a world) until the
+     * next {@link #upload}, which will resize everything correctly again.
+     */
+    public void clear() {
+        nodeCount = 0;
+        quadCount = 0L;
+    }
+
     public void bindForCompute() {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BINDING_NODES, nodeBuffer);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, BINDING_VISIBLE_NODE_INDICES, visibleNodeIndicesBuffer);

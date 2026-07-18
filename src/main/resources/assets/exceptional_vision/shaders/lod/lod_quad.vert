@@ -48,9 +48,9 @@ void main() {
     uint nodeIndex = visibleNodeIndices[gl_DrawID];
     NodeData node = nodes[nodeIndex];
 
-    uvec2 packed = quads[node.quadOffset + quadIndex];
-    uint packed0 = packed.x;
-    uint packed1 = packed.y;
+    uvec2 packedQuad = quads[node.quadOffset + quadIndex];
+    uint packed0 = packedQuad.x;
+    uint packed1 = packedQuad.y;
 
     uint localX = packed0 & 0x3Fu;
     uint localY = (packed0 >> 6u) & 0xFFFu;

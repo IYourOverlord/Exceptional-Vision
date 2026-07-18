@@ -79,6 +79,17 @@ public final class LodGpuPipeline implements AutoCloseable {
     }
 
     /**
+     * Stops drawing whatever was last uploaded (e.g. on leaving a world/dimension)
+     * without tearing down GL objects — {@link #uploadCache} for the next world will
+     * repopulate them from scratch. No-op if {@link #isActive()} is false.
+     */
+    public void clearCache() {
+        if (initialized) {
+            buffers.clear();
+        }
+    }
+
+    /**
      * Runs one frame: cull, read back the visible count, draw. No-op if
      * {@link #isActive()} is false or there's nothing cached yet.
      *

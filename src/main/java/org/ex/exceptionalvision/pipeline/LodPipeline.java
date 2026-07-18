@@ -54,6 +54,8 @@ public final class LodPipeline implements AutoCloseable {
     private final String modVersion;
 
     private final LodCacheWriter cacheWriter = new LodCacheWriter();
+    private final LodCacheLoader cacheLoader = new LodCacheLoader();
+    private final MaterialPalette materialPalette = new MaterialPalette();
     private final WorldDirectoryWatcher watcher;
     private final RegionImportQueue regionImportQueue;
     private final LodBuilderExecutor lodBuilderExecutor;
@@ -86,8 +88,7 @@ public final class LodPipeline implements AutoCloseable {
         this.modVersion = modVersion;
         this.onRegionCached = onRegionCached;
 
-        MaterialPalette palette = new MaterialPalette();
-        this.lodBuilderExecutor = new LodBuilderExecutor(builderThreads, palette, this::onLodBuilt);
+        this.lodBuilderExecutor = new LodBuilderExecutor(builderThreads, materialPalette, this::onLodBuilt);
         this.regionImportQueue = new RegionImportQueue(ioThreads, lodBuilderExecutor::submit);
         this.watcher = new WorldDirectoryWatcher();
     }
@@ -97,8 +98,32 @@ public final class LodPipeline implements AutoCloseable {
         return cachedAtStartup;
     }
 
+    /**
+     * The shared {@link MaterialPalette} this pipeline's {@link LodBuilderExecutor} has
+     * been assigning indices from since {@code start()}. Stage 4's GPU buffer manager
+     * needs {@link MaterialPalette#colorsSnapshot()} alongside every {@link #cachedAtStartup()}
+     * or {@link #reloadCache()} call, since the palette indices baked into
+     * {@code NodeData}/{@code PackedQuad} are only meaningful relative to this exact
+     * palette instance.
+     */
+    public MaterialPalette materialPalette() {
+        return materialPalette;
+    }
+
+    /**
+     * Re-reads the on-disk cache from scratch. Unlike {@link #cachedAtStartup()} this
+     * reflects whatever has been written since, at the cost of a full re-read/mmap —
+     * see the class javadoc's note on why {@code cachedAtStartup()} isn't kept live.
+     * Intended for stage 4's {@code onRegionCached} hook to call (on the render thread,
+     * not the builder thread that invoked the hook) when it wants a fresh snapshot to
+     * re-upload, until stage 5 replaces this with incremental buffer updates.
+     */
+    public LodCacheData reloadCache() {
+        return cacheLoader.load(worldDir, dimensionId, modVersion);
+    }
+
     public void start() {
-        cachedAtStartup = new LodCacheLoader().load(worldDir, dimensionId, modVersion);
+        cachedAtStartup = cacheLoader.load(worldDir, dimensionId, modVersion);
         ExceptionalVision.LOGGER.info("LOD pipeline starting for {}: cache has {} nodes, {} quads",
                 dimensionId, cachedAtStartup.nodeCount(), cachedAtStartup.quadCount());
 
