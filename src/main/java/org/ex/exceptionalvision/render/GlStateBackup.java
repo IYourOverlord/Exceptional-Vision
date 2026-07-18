@@ -20,6 +20,7 @@ final class GlStateBackup {
     private int vertexArray;
     private boolean depthTestEnabled;
     private int depthFunc;
+    private boolean depthMask;
     private boolean cullFaceEnabled;
     private boolean blendEnabled;
 
@@ -28,6 +29,7 @@ final class GlStateBackup {
         vertexArray = glGetInteger(GL_VERTEX_ARRAY_BINDING);
         depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
         depthFunc = glGetInteger(GL_DEPTH_FUNC);
+        depthMask = glGetBoolean(GL_DEPTH_WRITEMASK);
         cullFaceEnabled = glIsEnabled(GL_CULL_FACE);
         blendEnabled = glIsEnabled(GL_BLEND);
     }
@@ -37,6 +39,7 @@ final class GlStateBackup {
         glBindVertexArray(vertexArray);
         setEnabled(GL_DEPTH_TEST, depthTestEnabled);
         glDepthFunc(depthFunc);
+        glDepthMask(depthMask);
         setEnabled(GL_CULL_FACE, cullFaceEnabled);
         setEnabled(GL_BLEND, blendEnabled);
     }

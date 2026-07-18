@@ -43,7 +43,14 @@ layout(std430, binding = 5) buffer DrawCounter {
 };
 
 uniform vec4 frustumPlanes[6];  // xyz = normal (points INTO the frustum), w = distance; see FrustumExtractor.java
-uniform vec3 cameraWorldPos;
+uniform vec3 cameraWorldPos;   // BUGFIX: also used to translate node AABBs into camera-relative
+                                // space before the frustum test below - frustumPlanes come from a
+                                // translation-free (rotation+projection only) view-projection matrix,
+                                // i.e. a frustum centered at the origin, not at the camera's actual
+                                // world position (see LodRenderManager's javadoc on why). Testing
+                                // absolute-world-space AABBs against it was comparing coordinates in
+                                // two different spaces, which only coincidentally passed near world
+                                // origin and flickered in/out with camera rotation everywhere else.
 uniform float baseLodDistance;  // distance (blocks) at which level-0 nodes give way to level-1; doubles per level
 uniform uint nodeCount;
 uniform uint maxLodLevel;       // see LodBuilder.MAX_LEVEL (5) - the region-root level, drawn at any distance beyond its band
@@ -89,7 +96,7 @@ void main() {
     if (!lodLevelAppropriate(node)) {
         return;
     }
-    if (!aabbInFrustum(node.aabbMin.xyz, node.aabbMax.xyz)) {
+    if (!aabbInFrustum(node.aabbMin.xyz - cameraWorldPos, node.aabbMax.xyz - cameraWorldPos)) {
         return;
     }
 

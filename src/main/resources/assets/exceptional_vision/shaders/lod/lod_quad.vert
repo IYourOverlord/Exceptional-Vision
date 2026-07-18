@@ -48,7 +48,16 @@ void main() {
     uint nodeIndex = visibleNodeIndices[gl_DrawID];
     NodeData node = nodes[nodeIndex];
 
-    uvec2 packedQuad = quads[node.quadOffset + quadIndex];
+    // BUGFIX: quad_cull.comp already encodes this node's quadOffset into the indirect
+    // command's "first" field (commands[slot].first = node.quadOffset * 6u). Per the GL
+    // spec, gl_VertexID for a non-indexed draw equals first + i, so quadIndex above is
+    // ALREADY node.quadOffset + local-quad-index. Adding node.quadOffset again here was
+    // double-counting it, reading past this node's quad range (and, for any node past
+    // the first in the buffer, past unrelated data or the buffer's end entirely - on
+    // most drivers an out-of-bounds std430 SSBO read returns zero, which yields a
+    // degenerate zero-size quad, i.e. invisible geometry for every node except the very
+    // first one in NodeBuffer).
+    uvec2 packedQuad = quads[quadIndex];
     uint packed0 = packedQuad.x;
     uint packed1 = packedQuad.y;
 

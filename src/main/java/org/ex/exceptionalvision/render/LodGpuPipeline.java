@@ -144,6 +144,23 @@ public final class LodGpuPipeline implements AutoCloseable {
     }
 
     private void runDrawPass(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos, int drawCount) {
+        // BUGFIX: GlStateBackup only saves/restores whatever state was already set - it
+        // never established the state OUR draw actually needs. At Stage.AFTER_LEVEL, GL
+        // state is whatever vanilla's translucent pass left behind (typically
+        // glDepthMask(false), blending enabled, and GL_CULL_FACE enabled with a winding
+        // that only matches vanilla's own geometry). Our procedurally generated quads
+        // don't guarantee one consistent winding across the top-face vs. wall-face
+        // branches in lod_quad.vert, so leaving culling on can silently drop faces
+        // depending on view direction - a "some terrain missing" bug that's easy to
+        // miss visually. Set exactly what this opaque, single-sided-agnostic pass
+        // needs; stateBackup.restore() (called from the caller's finally block) puts
+        // everything back afterward regardless of what we change here.
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(true);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+
         glBindVertexArray(dummyVertexArray);
         drawProgram.use();
         buffers.bindForDraw();

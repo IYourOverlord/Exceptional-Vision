@@ -155,11 +155,22 @@ public final class GreedyMesher {
     private WallSegment wallBetween(ColumnGrid grid, int lowSideX, int lowSideZ, int highSideX, int highSideZ) {
         boolean aPresent = grid.present(lowSideX, lowSideZ);
         boolean bPresent = grid.present(highSideX, highSideZ);
-        if (!aPresent && !bPresent) {
+        // BUGFIX: previously only "both absent" bailed out here, and a lone absent side was
+        // given a Integer.MIN_VALUE sentinel height below, letting the wall span from the
+        // real (present) column's height all the way down to MIN_VALUE. When the real height
+        // is negative (completely normal below-sea-level terrain with the -64 build limit),
+        // `realHeight - Integer.MIN_VALUE` does NOT overflow back into a harmless negative -
+        // it lands as a legitimate ~2.1 billion-block-tall wall, which emitWallRun then
+        // dutifully chops into ~34 million MAX_WALL_QUAD_HEIGHT-tall quads from a single cell
+        // boundary. We have no idea what a not-yet-generated neighbor's height actually is,
+        // so - consistent with this class's own scope note that inter-node stitching is a
+        // later stage's problem, not this one's - the right answer is simply not to guess:
+        // skip the wall rather than fabricate one against absent data.
+        if (!aPresent || !bPresent) {
             return null;
         }
-        int aHeight = aPresent ? grid.height(lowSideX, lowSideZ) : Integer.MIN_VALUE;
-        int bHeight = bPresent ? grid.height(highSideX, highSideZ) : Integer.MIN_VALUE;
+        int aHeight = grid.height(lowSideX, lowSideZ);
+        int bHeight = grid.height(highSideX, highSideZ);
         if (aHeight == bHeight) {
             return null; // flush, nothing to fill
         }
@@ -186,8 +197,21 @@ public final class GreedyMesher {
         return new WallSegment(axis, fixed, lowY, highY, material, light);
     }
 
+    /**
+     * Generous upper bound on how tall a single wall run could ever legitimately be: the
+     * full world height range (-64..320, i.e. 384 blocks) with headroom to spare. Purely a
+     * defensive backstop - see the comment on the {@code !aPresent || !bPresent} check in
+     * {@link #wallBetween} for the specific bug this guards against; this cap means a similar
+     * mistake in the future degrades to "one wall is capped/wrong" instead of "silently
+     * generate tens of millions of quads and corrupt the shared GPU buffer for the whole map".
+     */
+    private static final int MAX_SANE_WALL_HEIGHT = 4096;
+
     private void emitWallRun(List<PackedQuad> out, WallSegment seg, int runCoordStart, int runLength) {
         int remaining = seg.highY - seg.lowY;
+        if (remaining > MAX_SANE_WALL_HEIGHT) {
+            remaining = MAX_SANE_WALL_HEIGHT; // clamp rather than risk generating millions of quads
+        }
         int currentLowY = seg.lowY;
         while (remaining > 0) {
             int chunkHeight = Math.min(remaining, MAX_WALL_QUAD_HEIGHT);
