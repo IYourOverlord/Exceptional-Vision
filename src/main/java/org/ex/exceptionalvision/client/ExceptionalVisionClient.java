@@ -12,6 +12,7 @@ import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import org.ex.exceptionalvision.ExceptionalVision;
+import org.ex.exceptionalvision.cache.CacheCompactor;
 import org.ex.exceptionalvision.cache.LodCacheData;
 import org.ex.exceptionalvision.config.ExceptionalVisionConfig;
 import org.ex.exceptionalvision.pipeline.LodPipeline;
@@ -56,6 +57,19 @@ public final class ExceptionalVisionClient {
 
     private static LodPipeline activePipeline;
     private static ResourceKey<Level> activeDimension;
+    private static Path activeWorldRoot;
+
+    /**
+     * Tracks dimensions whose cache is currently being compacted in the background (see
+     * {@link #runCompactionOffThread}), so a fast unload→reload of the *same* dimension
+     * (e.g. stepping through a portal and immediately back) can wait the compaction out
+     * instead of racing {@link LodPipeline#start} against {@link CacheCompactor#compact}
+     * rewriting {@code nodes.bin}/{@code index.json} underneath it. Different dimensions
+     * never share a cache directory, so this only ever blocks on same-dimension re-entry,
+     * not on every dimension change.
+     */
+    private static final java.util.Map<String, java.util.concurrent.CountDownLatch> COMPACTIONS_IN_PROGRESS =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private ExceptionalVisionClient() {
     }
@@ -114,12 +128,15 @@ public final class ExceptionalVisionClient {
 
         Path worldRoot = integratedServer.getWorldPath(LevelResource.ROOT);
         Path regionDir = resolveRegionDir(worldRoot, dimension);
+        String dimensionId = dimension.location().toString();
+
+        awaitAnyInProgressCompaction(dimensionId);
 
         try {
             LodPipeline pipeline = new LodPipeline(
                     worldRoot,
                     regionDir,
-                    dimension.location().toString(),
+                    dimensionId,
                     ExceptionalVision.MOD_VERSION,
                     2,
                     Math.max(1, Runtime.getRuntime().availableProcessors() - 1),
@@ -127,6 +144,7 @@ public final class ExceptionalVisionClient {
 
             activePipeline = pipeline;
             activeDimension = dimension;
+            activeWorldRoot = worldRoot;
             pipeline.start();
 
             if (GPU_PIPELINE.isActive()) {
@@ -139,6 +157,7 @@ public final class ExceptionalVisionClient {
             ExceptionalVision.LOGGER.error("Failed to start LOD pipeline for {}", dimension.location(), e);
             activePipeline = null;
             activeDimension = null;
+            activeWorldRoot = null;
         }
     }
 
@@ -146,10 +165,74 @@ public final class ExceptionalVisionClient {
         if (activePipeline == null) {
             return;
         }
-        activePipeline.close();
+        Path worldRootToCompact = activeWorldRoot;
+        String dimensionIdToCompact = activeDimension.location().toString();
+
+        activePipeline.close(); // waits out in-flight region writes before we touch the cache files below
         activePipeline = null;
         activeDimension = null;
+        activeWorldRoot = null;
         GPU_PIPELINE.clearCache(); // stop drawing the old dimension's geometry into the new one
+
+        runCompactionOffThread(worldRootToCompact, dimensionIdToCompact);
+    }
+
+    /**
+     * Blocks the calling thread (the render thread, via {@link #startPipeline}) until any
+     * compaction already running for {@code dimensionId} finishes. A no-op — returns
+     * immediately — in the overwhelmingly common case where no compaction is in flight for
+     * this dimension; only actually waits on the narrow race described in
+     * {@link #COMPACTIONS_IN_PROGRESS}'s javadoc. Bounded by how long
+     * {@link CacheCompactor#compact} itself takes (a full read/rewrite of the dimension's
+     * {@code nodes.bin}/{@code quads.bin}) — no different in kind from the disk I/O
+     * {@link LodPipeline#start} is about to do anyway on this same thread.
+     */
+    private static void awaitAnyInProgressCompaction(String dimensionId) {
+        java.util.concurrent.CountDownLatch inProgress = COMPACTIONS_IN_PROGRESS.get(dimensionId);
+        if (inProgress == null) {
+            return;
+        }
+        try {
+            inProgress.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * {@link CacheCompactor#compact} does full reads/rewrites of {@code nodes.bin}/
+     * {@code quads.bin} — fine for "once per dimension unload", but it must not run on
+     * whichever thread {@link #stopPipeline} was called from (the render thread, via
+     * {@link #onLevelUnload}): blocking that thread on disk I/O for a large, long-lived
+     * world would show up as a hitch/freeze right at the moment the player leaves a
+     * dimension. {@link LodPipeline#close()} has already been awaited by the time this
+     * runs, so there's no writer left to race against — except a fast unload→reload of
+     * this same dimension, which {@link #awaitAnyInProgressCompaction} guards against by
+     * registering/clearing this run's latch in {@link #COMPACTIONS_IN_PROGRESS}.
+     */
+    private static void runCompactionOffThread(Path worldRoot, String dimensionId) {
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        COMPACTIONS_IN_PROGRESS.put(dimensionId, latch);
+
+        Thread compactionThread = new Thread(() -> {
+            try {
+                CacheCompactor.Result result = new CacheCompactor().compact(worldRoot, dimensionId);
+                if (result.totalBytesReclaimed() > 0) {
+                    ExceptionalVision.LOGGER.info("Exceptional Vision: compacted LOD cache for {} ({} bytes reclaimed)",
+                            dimensionId, result.totalBytesReclaimed());
+                }
+            } catch (IOException e) {
+                // Non-fatal: worst case the cache stays a bit larger on disk than necessary
+                // until the next successful compaction, exactly as if this run never happened.
+                ExceptionalVision.LOGGER.warn("Exceptional Vision: failed to compact LOD cache for {}: {}",
+                        dimensionId, e.toString());
+            } finally {
+                COMPACTIONS_IN_PROGRESS.remove(dimensionId, latch);
+                latch.countDown();
+            }
+        }, "exceptional-vision-cache-compactor");
+        compactionThread.setDaemon(true);
+        compactionThread.start();
     }
 
     /**

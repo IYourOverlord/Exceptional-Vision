@@ -34,11 +34,12 @@ import java.util.zip.CRC32;
  *   <li>{@link #appendQuads} + {@link #patchNode} — the low-level primitives the two
  *       methods above are built on; still usable directly for finer-grained updates.</li>
  * </ul>
- * <b>Known gap:</b> only {@code quads.bin} is compacted ({@link CacheCompactor}) —
- * {@code nodes.bin} has no equivalent yet, so a region reprocessed via
- * {@link #appendRegion} (node count changed) leaves its old node records as dead weight.
- * Rare in practice (only happens when a region's chunk topology itself changes, not just
- * block content) but worth knowing before relying on this for very long-running worlds.
+ * <b>Known gap (closed):</b> {@code nodes.bin} used to have no compactor, only
+ * {@code quads.bin} did — a region reprocessed via {@link #appendRegion} (node count
+ * changed) left its old node records as dead weight forever. {@link CacheCompactor#compactNodes}
+ * now reclaims those too, driven off {@code index.json}'s {@code regionsProcessed} (the
+ * live set of node ranges) exactly the way {@link org.ex.exceptionalvision.cache.LodCacheData#of}
+ * already filters them out at load time.
  */
 public final class LodCacheWriter {
 
@@ -50,7 +51,7 @@ public final class LodCacheWriter {
      * Used for the first-ever build and for full-world (re)imports.
      */
     public void writeFull(Path worldDir, String dimensionId, String modVersion,
-                           List<NodeData> nodes, List<PackedQuad> quads, List<RegionCacheEntry> regionsProcessed) throws IOException {
+                          List<NodeData> nodes, List<PackedQuad> quads, List<RegionCacheEntry> regionsProcessed) throws IOException {
         Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
 
         CacheIo.writeAtomic(LodCacheFormat.nodesFile(dimDir), channel -> writeNodes(channel, nodes));
@@ -134,8 +135,8 @@ public final class LodCacheWriter {
      * appends.
      */
     public void appendRegion(Path worldDir, String dimensionId, String modVersion,
-                              RegionCoordinate regionCoordinate, long mtimeMs, String sourceHash,
-                              List<NodeData> nodes, List<PackedQuad> quads) throws IOException {
+                             RegionCoordinate regionCoordinate, long mtimeMs, String sourceHash,
+                             List<NodeData> nodes, List<PackedQuad> quads) throws IOException {
         Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
         Path nodesFile = LodCacheFormat.nodesFile(dimDir);
         Path quadsFile = LodCacheFormat.quadsFile(dimDir);
@@ -164,8 +165,8 @@ public final class LodCacheWriter {
      *         instead in that case
      */
     public void patchRegion(Path worldDir, String dimensionId, String modVersion,
-                             RegionCoordinate regionCoordinate, long mtimeMs, String sourceHash,
-                             RegionCacheEntry previousEntry, List<NodeData> nodes, List<PackedQuad> quads) throws IOException {
+                            RegionCoordinate regionCoordinate, long mtimeMs, String sourceHash,
+                            RegionCacheEntry previousEntry, List<NodeData> nodes, List<PackedQuad> quads) throws IOException {
         if (nodes.size() != previousEntry.nodeCount()) {
             throw new IllegalArgumentException("patchRegion requires an unchanged node count (was "
                     + previousEntry.nodeCount() + ", now " + nodes.size() + "); use appendRegion instead");

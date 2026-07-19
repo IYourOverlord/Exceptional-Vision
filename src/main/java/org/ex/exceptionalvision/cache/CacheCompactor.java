@@ -13,26 +13,125 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Reclaims quads orphaned by repeated {@link LodCacheWriter#appendQuads} calls.
+ * Reclaims disk space orphaned by repeated {@link LodCacheWriter} updates — both dead
+ * quads ({@link LodCacheWriter#appendQuads}/{@link LodCacheWriter#patchRegion}) and dead
+ * node records ({@link LodCacheWriter#appendRegion} on a region whose node count changed).
  * <p>
- * Every {@code NodeData} record in {@code nodes.bin} always points at that node's
- * *current* quad range — when a node is recomputed, {@link LodCacheWriter#patchNode}
- * repoints it at a freshly appended range and the old range becomes dead weight in
- * {@code quads.bin} (never read again, but still taking up disk space). Compaction walks
- * {@code nodes.bin} — which is therefore exactly the "live set" — copies only the quads
- * each node still references into a fresh {@code quads.bin}, and patches each node's
- * {@code quadOffset} to match. Node *indices* (and therefore any external references to
- * node {@code i}, e.g. from the GPU streaming system) are left untouched — only the quad
- * ranges they point at move. See "Инкрементальное обновление", step 3, in
- * {@code 06_disk_cache_format.md}.
+ * <b>Quads:</b> every {@code NodeData} record in {@code nodes.bin} always points at that
+ * node's *current* quad range — when a node is recomputed, the old range it used to point
+ * at becomes dead weight in {@code quads.bin} (never read again, but still taking up disk
+ * space). {@link #compactQuads} walks {@code nodes.bin} — which is exactly the "live set"
+ * of quad ranges — copies only the quads each node still references into a fresh
+ * {@code quads.bin}, and patches each node's {@code quadOffset} to match. Node *indices*
+ * are left untouched by this step — only the quad ranges they point at move.
  * <p>
- * Intended to run periodically (e.g. every few minutes of play, or on world unload), not
- * every frame — it does a full read of {@code quads.bin}.
+ * <b>Nodes:</b> {@code index.json}'s {@code regionsProcessed} entries are the analogous
+ * "live set" for {@code nodes.bin} — each entry's {@code nodeIndexStart}/{@code nodeCount}
+ * names the one contiguous block of node records that region currently owns. When
+ * {@link LodCacheWriter#appendRegion} reprocesses a region whose node count changed, it
+ * appends a brand-new block and overwrites that region's index entry to point at it — the
+ * region's *previous* block is no longer referenced by anything and becomes dead weight in
+ * {@code nodes.bin}, exactly mirroring how old quad ranges go dead. {@link #compactNodes}
+ * walks {@code regionsProcessed}, copies only the node records each entry still references
+ * into a fresh {@code nodes.bin} (ordered by ascending old {@code nodeIndexStart}, so a
+ * region's nodes stay contiguous), and rewrites {@code index.json} with the new offsets.
+ * <p>
+ * Unlike the quad step, node compaction necessarily <em>renumbers</em> node indices (dead
+ * blocks in the middle must be dropped, closing the gap). That's safe here because nothing
+ * in this codebase holds a node index across a compaction boundary: the GPU streaming
+ * system (stage 4) only ever consumes a full {@code LodCacheData} snapshot
+ * ({@code LodPipeline#cachedAtStartup()}/{@code reloadCache()}) and re-uploads it whole, it
+ * never persists "node 42" across separate cache reads. If a future stage introduces
+ * long-lived external references to node indices (e.g. incremental GPU buffer patching in
+ * stage 5), this class's node-renumbering behavior must be revisited first.
+ * <p>
+ * {@link #compact} runs both steps in the correct order: nodes first (so the node list
+ * {@link #compactQuads} walks is already the true live set with no dead blocks), then
+ * quads. Intended to run periodically (e.g. every few minutes of play, or on world/dimension
+ * unload), not every frame — both steps do a full read of their respective file.
  */
 public final class CacheCompactor {
 
+    /** Bytes reclaimed by one {@link #compact} run. */
+    public record Result(long nodeBytesReclaimed, long quadBytesReclaimed) {
+        public long totalBytesReclaimed() {
+            return nodeBytesReclaimed + quadBytesReclaimed;
+        }
+    }
+
+    /**
+     * Runs {@link #compactNodes} followed by {@link #compactQuads} — the order matters,
+     * see the class javadoc.
+     */
+    public Result compact(Path worldDir, String dimensionId) throws IOException {
+        long nodeBytes = compactNodes(worldDir, dimensionId);
+        long quadBytes = compactQuads(worldDir, dimensionId);
+        return new Result(nodeBytes, quadBytes);
+    }
+
+    /**
+     * Drops node records no longer referenced by any entry in {@code index.json}'s
+     * {@code regionsProcessed} (left behind when {@link LodCacheWriter#appendRegion}
+     * reprocesses a region whose node count changed), and rewrites {@code index.json}
+     * with the new (now-contiguous, gap-free) offsets.
+     *
+     * @return bytes reclaimed (old nodes.bin size minus new nodes.bin size), or 0 if there was nothing to compact.
+     */
+    public long compactNodes(Path worldDir, String dimensionId) throws IOException {
+        Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
+        Path nodesFile = LodCacheFormat.nodesFile(dimDir);
+        Path indexFile = LodCacheFormat.indexFile(dimDir);
+
+        if (!Files.isRegularFile(nodesFile) || !Files.isRegularFile(indexFile)) {
+            return 0L; // nothing built yet
+        }
+
+        long oldNodesBytes = Files.size(nodesFile);
+
+        List<NodeData> allNodes = readAllNodes(nodesFile);
+        CacheIndex index = CacheIndex.readFrom(indexFile);
+
+        // Walk live regions in ascending old-offset order so each region's nodes stay
+        // contiguous in the compacted file, then rewrite each entry's nodeIndexStart to
+        // where its block actually landed.
+        List<RegionCacheEntry> orderedEntries = new ArrayList<>(index.regionsProcessed());
+        orderedEntries.sort(java.util.Comparator.comparingInt(RegionCacheEntry::nodeIndexStart));
+
+        List<NodeData> liveNodes = new ArrayList<>(allNodes.size());
+        List<RegionCacheEntry> relocatedEntries = new ArrayList<>(orderedEntries.size());
+
+        for (RegionCacheEntry entry : orderedEntries) {
+            int newStart = liveNodes.size();
+            for (int i = 0; i < entry.nodeCount(); i++) {
+                int sourceIndex = entry.nodeIndexStart() + i;
+                if (sourceIndex < 0 || sourceIndex >= allNodes.size()) {
+                    // Defensive: a corrupt/truncated file or a pre-nodeIndexStart legacy
+                    // entry (defaults to 0/0, see RegionCacheEntry javadoc) shouldn't crash
+                    // compaction — just stop copying this region's block early.
+                    ExceptionalVision.LOGGER.warn(
+                            "LOD cache for {}: region ({},{}) node index {} out of range (nodeCount={}) while compacting, dropping",
+                            dimensionId, entry.x(), entry.z(), sourceIndex, allNodes.size());
+                    break;
+                }
+                liveNodes.add(allNodes.get(sourceIndex));
+            }
+            relocatedEntries.add(entry.withNodeRange(newStart, liveNodes.size() - newStart));
+        }
+
+        writeCompactedNodes(nodesFile, liveNodes);
+
+        CacheIndex compactedIndex = new CacheIndex(index.formatVersion(), index.modVersion(), index.dimension(), relocatedEntries);
+        compactedIndex.writeTo(indexFile);
+
+        long newNodesBytes = Files.size(nodesFile);
+        long reclaimed = oldNodesBytes - newNodesBytes;
+        ExceptionalVision.LOGGER.info("Compacted LOD node cache for {}: {} -> {} nodes ({} bytes reclaimed)",
+                dimensionId, allNodes.size(), liveNodes.size(), reclaimed);
+        return Math.max(reclaimed, 0L);
+    }
+
     /** @return bytes reclaimed (old quads.bin size minus new quads.bin size), or 0 if there was nothing to compact. */
-    public long compact(Path worldDir, String dimensionId) throws IOException {
+    public long compactQuads(Path worldDir, String dimensionId) throws IOException {
         Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
         Path nodesFile = LodCacheFormat.nodesFile(dimDir);
         Path quadsFile = LodCacheFormat.quadsFile(dimDir);
@@ -73,7 +172,7 @@ public final class CacheCompactor {
 
         long newQuadsBytes = Files.size(quadsFile);
         long reclaimed = oldQuadsBytes - newQuadsBytes;
-        ExceptionalVision.LOGGER.info("Compacted LOD cache for {}: {} -> {} quads ({} bytes reclaimed)",
+        ExceptionalVision.LOGGER.info("Compacted LOD quad cache for {}: {} -> {} quads ({} bytes reclaimed)",
                 dimensionId, liveQuadCount, compactedQuads.size(), reclaimed);
         return Math.max(reclaimed, 0L);
     }
