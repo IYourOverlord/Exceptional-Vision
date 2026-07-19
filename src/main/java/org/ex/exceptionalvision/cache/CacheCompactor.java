@@ -143,7 +143,10 @@ public final class CacheCompactor {
         long oldQuadsBytes = Files.size(quadsFile);
 
         List<NodeData> nodes = readAllNodes(nodesFile);
-        ByteBuffer quads = CacheIo.mapReadOnly(quadsFile).order(ByteOrder.LITTLE_ENDIAN);
+        // Same reasoning as readAllNodes above: not mapReadOnly, because writeCompactedQuads
+        // below atomically replaces this exact file — a lingering mapping would make that
+        // Files.move fail with AccessDeniedException on Windows.
+        ByteBuffer quads = ByteBuffer.wrap(Files.readAllBytes(quadsFile)).order(ByteOrder.LITTLE_ENDIAN);
         long liveQuadCount = quads.getLong(0);
 
         List<PackedQuad> compactedQuads = new ArrayList<>();
@@ -178,7 +181,17 @@ public final class CacheCompactor {
     }
 
     private List<NodeData> readAllNodes(Path nodesFile) throws IOException {
-        ByteBuffer buffer = CacheIo.mapReadOnly(nodesFile).order(ByteOrder.LITTLE_ENDIAN);
+        // Deliberately NOT CacheIo.mapReadOnly here (unlike LodCacheLoader, which keeps its
+        // mapping alive for the GPU upload) — this method's caller (compactNodes) turns
+        // around and atomically replaces this exact file a few lines later. On Windows, a
+        // MappedByteBuffer keeps the underlying file locked until the JVM actually unmaps it
+        // (there is no explicit unmap in the public API — it happens whenever GC reclaims the
+        // buffer, which is not guaranteed to happen in time), so the subsequent
+        // Files.move(..., REPLACE_EXISTING) reliably throws AccessDeniedException before ever
+        // touching the file. A plain full read avoids holding any OS-level handle/mapping past
+        // this method returning. Confirmed via a player's real (Windows) log: compaction failed
+        // with exactly this AccessDeniedException on every attempt before this fix.
+        ByteBuffer buffer = ByteBuffer.wrap(Files.readAllBytes(nodesFile)).order(ByteOrder.LITTLE_ENDIAN);
         int count = buffer.getInt(0);
         List<NodeData> nodes = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
