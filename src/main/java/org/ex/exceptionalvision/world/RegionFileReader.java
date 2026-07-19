@@ -223,9 +223,21 @@ public final class RegionFileReader {
         if (state == null || state.isAir()) {
             return false;
         }
+        // FIX: water (and lava) previously fell through to canOcclude() below, which is
+        // false for fluids (you can see the lakebed through water in vanilla rendering,
+        // so it doesn't occlude neighboring faces) - so the scan kept going *past* every
+        // water column looking for the next "occluding" block, landing on the seafloor.
+        // The LOD then rendered that seafloor's color (sand/gravel/whatever) as if it
+        // were dry land, with no indication a lake or ocean was ever there - confirmed by
+        // a user screenshot where a whole sea rendered as a tan/green "island" identical
+        // in appearance to the surrounding beach. A fluid's own top surface is what a
+        // distant LOD should show (a flat water-colored plane), not what's underneath it -
+        // this is the "water surface vs. floor" special-casing the old comment here
+        // anticipated but that never actually got implemented in LodBuilder.
+        if (!state.getFluidState().isEmpty()) {
+            return true;
+        }
         // Approximation of "opaque" for the purposes of a distant LOD silhouette.
-        // Refined per-material handling (e.g. water surface vs. floor, leaves) is
-        // expected to live in the LOD Builder (stage 2), not here.
         return state.canOcclude();
     }
 

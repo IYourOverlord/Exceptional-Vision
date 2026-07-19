@@ -8,9 +8,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -37,6 +40,25 @@ public final class RegionImportQueue implements AutoCloseable {
             return byPriority != 0 ? byPriority : Long.compare(sequence, other.sequence);
         }
     }
+
+    // FIX: an IOException here (almost always EOFException from a region file that's
+    // mid-write - a header/sector not fully flushed yet) used to be a silent, permanent
+    // drop: the task was logged and discarded, with nothing left to ever retry it unless
+    // WorldDirectoryWatcher happened to fire another event for that exact file. In
+    // practice (e.g. a separate bulk chunk-pregeneration mod writing many region files
+    // back-to-back) that reliably meant "most regions never get a single successful
+    // read all session" - confirmed by a real run where every region but one failed this
+    // way and was never retried. A few short, capped retries turns "file caught mid-write"
+    // back into "processed a little late" instead of "never processed".
+    private static final int MAX_READ_RETRIES = 5;
+    private static final long RETRY_DELAY_MS = 750;
+
+    private final java.util.Map<Path, Integer> readRetryCounts = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "exceptional-vision-region-io-retry");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private final RegionFileReader reader = new RegionFileReader();
     private final PriorityBlockingQueue<Task> queue = new PriorityBlockingQueue<>();
@@ -120,18 +142,42 @@ public final class RegionImportQueue implements AutoCloseable {
                     chunks.add(reader.extractHeightData(chunkNbt));
                 }
             }
+            readRetryCounts.remove(task.mcaFile()); // this file is fine now, forget any earlier failures
             onRegionRead.accept(new RegionResult(task.coordinate(), chunks));
         } catch (IOException e) {
-            ExceptionalVision.LOGGER.warn("Failed to read region file {}: {}", task.mcaFile(), e.toString());
+            retryOrGiveUp(task, e);
         } catch (RuntimeException e) {
             // Defensive: a single malformed chunk/section must not kill the worker thread.
             ExceptionalVision.LOGGER.error("Unexpected error processing region file {}", task.mcaFile(), e);
         }
     }
 
+    /**
+     * Re-queues {@code task} after a short delay, up to {@link #MAX_READ_RETRIES} times,
+     * instead of dropping it after the first failure - see the field javadoc above for
+     * why. Retries run through the same {@link #queue}/worker pool as any other task (at
+     * the task's original priority), the scheduler here only provides the delay.
+     */
+    private void retryOrGiveUp(Task task, IOException cause) {
+        int attempt = readRetryCounts.merge(task.mcaFile(), 1, Integer::sum);
+        if (!running || attempt > MAX_READ_RETRIES) {
+            ExceptionalVision.LOGGER.warn("Failed to read region file {} after {} attempt(s), giving up for this session: {}",
+                    task.mcaFile(), attempt, cause.toString());
+            return;
+        }
+        ExceptionalVision.LOGGER.debug("Region file {} not ready yet (attempt {}/{}): {} - retrying in {}ms",
+                task.mcaFile(), attempt, MAX_READ_RETRIES, cause.toString(), RETRY_DELAY_MS);
+        retryScheduler.schedule(() -> {
+            if (running) {
+                queue.put(new Task(task.coordinate(), task.mcaFile(), task.priority(), sequenceCounter.incrementAndGet()));
+            }
+        }, RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
+    }
+
     @Override
     public void close() {
         running = false;
         ioExecutor.shutdownNow();
+        retryScheduler.shutdownNow();
     }
 }

@@ -1,6 +1,7 @@
 package org.ex.exceptionalvision.render;
 
 import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import org.ex.exceptionalvision.ExceptionalVision;
 import org.joml.Matrix4f;
@@ -29,6 +30,14 @@ import org.joml.Vector3f;
  */
 public final class LodRenderManager {
 
+    // FIX (stage 6 gap): vanilla's own chunk rendering already covers everything out to
+    // the player's render-distance setting - drawing LOD geometry inside that radius too
+    // is exactly what produced the z-fighting/overlapping-terrain artifacts seen
+    // in-game. One extra chunk of margin absorbs the (normal) mismatch between vanilla's
+    // render-distance culling and our own frustum culling, so nothing pops at the seam
+    // as the camera turns.
+    private static final int NEAR_CUTOFF_MARGIN_CHUNKS = 1;
+
     private final LodGpuPipeline pipeline;
 
     public LodRenderManager(LodGpuPipeline pipeline) {
@@ -54,6 +63,12 @@ public final class LodRenderManager {
             // it with the projection matrix the same way vanilla does keeps our geometry
             // aligned with everything else in the frame.
             Matrix4f viewProjection = new Matrix4f(event.getProjectionMatrix()).mul(event.getModelViewMatrix());
+
+            // Read every frame, not cached at init - the player can change this in the
+            // options menu (or via a server-imposed clamp) mid-session.
+            int renderDistanceChunks = Minecraft.getInstance().options.getEffectiveRenderDistance();
+            float nearCutoffBlocks = (renderDistanceChunks + NEAR_CUTOFF_MARGIN_CHUNKS) * 16.0f;
+            pipeline.setNearCutoffDistance(nearCutoffBlocks);
 
             pipeline.renderLodFrame(viewProjection, cameraWorldPos);
         } catch (RuntimeException e) {

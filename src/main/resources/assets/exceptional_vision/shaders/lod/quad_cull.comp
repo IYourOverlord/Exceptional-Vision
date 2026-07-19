@@ -52,6 +52,13 @@ uniform vec3 cameraWorldPos;   // BUGFIX: also used to translate node AABBs into
                                 // two different spaces, which only coincidentally passed near world
                                 // origin and flickered in/out with camera rotation everywhere else.
 uniform float baseLodDistance;  // distance (blocks) at which level-0 nodes give way to level-1; doubles per level
+uniform float nearCutoffDistance; // FIX (stage 6 gap): blocks within this distance are already covered by
+                                   // vanilla's own chunk rendering (Stage.AFTER_LEVEL runs after it). Without
+                                   // this cutoff every LOD node - including level 0, which starts its band at
+                                   // distance 0 - drew directly on top of that vanilla geometry, causing the
+                                   // z-fighting/overlapping-terrain artifacts seen in-game. Set from the
+                                   // client's actual render distance (see LodRenderManager), not a constant,
+                                   // since that setting can change at runtime.
 uniform uint nodeCount;
 uniform uint maxLodLevel;       // see LodBuilder.MAX_LEVEL (5) - the region-root level, drawn at any distance beyond its band
 uniform uint maxDrawCommands;   // capacity of VisibleNodeIndices / IndirectCommands - see LodGpuBuffers
@@ -91,6 +98,13 @@ void main() {
 
     NodeData node = nodes[idx];
     if (node.quadCount == 0u) {
+        return;
+    }
+    // FIX (stage 6 gap): closest AABB corner to the camera must clear the near cutoff,
+    // or this node is (at least partly) inside territory vanilla already renders at full
+    // detail - skip it rather than draw duplicate/overlapping geometry there.
+    vec3 closest = clamp(cameraWorldPos, node.aabbMin.xyz, node.aabbMax.xyz);
+    if (distance(cameraWorldPos, closest) < nearCutoffDistance) {
         return;
     }
     if (!lodLevelAppropriate(node)) {

@@ -43,6 +43,14 @@ public final class LodGpuPipeline implements AutoCloseable {
     private float baseLodDistance = 128.0f;
     private int maxLodLevel = 5; // must match LodBuilder.MAX_LEVEL
 
+    // FIX (stage 6 gap): distance below which we don't draw LOD geometry at all, because
+    // vanilla's own chunk rendering already covers it (see quad_cull.comp). Kept as a
+    // per-frame value rather than baked into baseLodDistance because the vanilla render
+    // distance it should track can change at runtime (F3 menu / options), while
+    // baseLodDistance/maxLodLevel are config-driven and only change at (re)load. Defaults
+    // to 0 (no cutoff) until LodRenderManager supplies a real value every frame.
+    private float nearCutoffDistance = 0.0f;
+
     /** Must be called once on the render thread, with a current GL context. Safe to call even if unsupported - just leaves the pipeline disabled. */
     public void init() {
         capabilities = GpuCapabilities.detect();
@@ -70,12 +78,27 @@ public final class LodGpuPipeline implements AutoCloseable {
         this.maxLodLevel = maxLodLevel;
     }
 
-    /** Uploads a fresh cache snapshot (e.g. at world load, or after a batch of regions finished building) to the GPU. */
+    /**
+     * Called once per frame from {@link LodRenderManager} with the current vanilla
+     * render distance (in blocks, plus margin) - see that class for why this can't just
+     * be a config value like {@link #setLodDistanceSettings}.
+     */
+    public void setNearCutoffDistance(float nearCutoffDistance) {
+        this.nearCutoffDistance = nearCutoffDistance;
+    }
+
+    /**
+     * Uploads a fresh cache snapshot (e.g. at world load, or after a batch of regions
+     * finished building) to the GPU - incrementally where possible (see
+     * {@link LodGpuBuffers#uploadIncremental}'s javadoc for what that means and why
+     * it's safe), transparently falling back to a full reupload for the first call and
+     * the rare cases that need one.
+     */
     public void uploadCache(LodCacheData cacheData, List<Integer> materialColors) {
         if (!initialized) {
             return;
         }
-        buffers.upload(cacheData, materialColors);
+        buffers.uploadIncremental(cacheData, materialColors);
     }
 
     /**
@@ -135,6 +158,7 @@ public final class LodGpuPipeline implements AutoCloseable {
 
         cullProgram.setUniform3f("cameraWorldPos", cameraWorldPos.x(), cameraWorldPos.y(), cameraWorldPos.z());
         cullProgram.setUniform1f("baseLodDistance", baseLodDistance);
+        cullProgram.setUniform1f("nearCutoffDistance", nearCutoffDistance);
         cullProgram.setUniform1ui("nodeCount", buffers.nodeCount());
         cullProgram.setUniform1ui("maxLodLevel", maxLodLevel);
         cullProgram.setUniform1ui("maxDrawCommands", buffers.maxDrawCommands());
