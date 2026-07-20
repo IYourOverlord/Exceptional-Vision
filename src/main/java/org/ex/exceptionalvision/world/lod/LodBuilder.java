@@ -60,16 +60,51 @@ public final class LodBuilder {
 
         List<LodNode> allNodes = new ArrayList<>();
         List<LevelStats> stats = new ArrayList<>();
+        stitchLevel(level, CHUNKS_PER_REGION_SIDE);
         addLevelNodes(level, 0, allNodes, stats);
 
         int width = CHUNKS_PER_REGION_SIDE;
         for (int currentLevel = 0; currentLevel < MAX_LEVEL; currentLevel++) {
             level = buildNextLevel(region.coordinate(), level, width, currentLevel);
             width /= 2;
+            stitchLevel(level, width);
             addLevelNodes(level, currentLevel + 1, allNodes, stats);
         }
 
         return flatten(region.coordinate(), allNodes, stats);
+    }
+
+    /**
+     * Closes the seam between every pair of same-level, horizontally/vertically-adjacent
+     * nodes in this level's grid by appending boundary wall quads to the east/north
+     * node of each pair (see {@link GreedyMesher#meshBoundaryAlongX}/
+     * {@code meshBoundaryAlongZ} for why it's always the east/north side that receives
+     * the quads). Only intra-region, same-level seams are closed this way — the region's
+     * own outer edge (no neighboring region's grid available here) and LOD-level
+     * transitions (a node's neighbor at a coarser/finer level lives in a different
+     * level's array, not this one) are out of scope; see "Баг 9" in {@code PROGRESS.md}.
+     */
+    private void stitchLevel(LodNode[][] level, int width) {
+        for (int z = 0; z < width; z++) {
+            for (int x = 0; x < width; x++) {
+                LodNode node = level[x][z];
+                if (node == null) {
+                    continue;
+                }
+                if (x + 1 < width) {
+                    LodNode east = level[x + 1][z];
+                    if (east != null) {
+                        east.quads.addAll(mesher.meshBoundaryAlongX(node.grid, east.grid));
+                    }
+                }
+                if (z + 1 < width) {
+                    LodNode north = level[x][z + 1];
+                    if (north != null) {
+                        north.quads.addAll(mesher.meshBoundaryAlongZ(node.grid, north.grid));
+                    }
+                }
+            }
+        }
     }
 
     private LodNode[][] buildLevelZero(RegionCoordinate regionCoordinate, ChunkHeightData[][] chunksByLocalPos) {

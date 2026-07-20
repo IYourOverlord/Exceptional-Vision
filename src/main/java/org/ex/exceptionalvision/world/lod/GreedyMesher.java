@@ -13,13 +13,18 @@ import java.util.List;
  *       not derived from any specific mod's source, per {@code 01_legal_constraints.md});</li>
  *   <li>vertical "wall" quads at height discontinuities between neighboring cells, so
  *       the LOD silhouette doesn't have a visible gap where one column is taller than
- *       its neighbor.</li>
+ *       its neighbor — both within a single node's own grid ({@link #meshWallsAlongX}/
+ *       {@link #meshWallsAlongZ}) and, since this class only sees {@link ColumnGrid}s
+ *       and never a node's world position, across the seam between two adjacent
+ *       <em>same-level</em> nodes when the caller supplies both grids
+ *       ({@link #meshBoundaryAlongX}/{@link #meshBoundaryAlongZ}; see {@link LodBuilder}
+ *       for where that's wired up).</li>
  * </ul>
- * <b>Scope note:</b> wall quads are only generated at <em>interior</em> cell boundaries
- * (never at the outer edge of the node's 16x16 grid) — stitching the seam between two
- * sibling LOD nodes needs to know about the neighboring node, which this class doesn't
- * have access to, so that's left to border/fade handling in a later stage
- * (see "стыковка" in {@code 07_forge_integration.md}).
+ * <b>Scope note:</b> {@link #meshBoundaryAlongX}/{@link #meshBoundaryAlongZ} only close
+ * seams between two nodes of the <em>same</em> LOD level — a node bordering a
+ * differently-leveled neighbor (i.e. a LOD distance-band transition) still has an open
+ * seam there, and so does a node at the edge of its region (no cross-region grid access
+ * here). Both remain open problems; see "Баг 9" in {@code PROGRESS.md}.
  * <p>
  * <b>packed1 width/height convention</b> (not fully pinned down by
  * {@code 03_data_formats.md}, so documented here for whatever consumes it next — the
@@ -104,14 +109,14 @@ public final class GreedyMesher {
         for (int x = 0; x < ColumnGrid.SIZE - 1; x++) {
             int z = 0;
             while (z < ColumnGrid.SIZE) {
-                WallSegment seg = wallBetween(grid, x, z, x + 1, z);
+                WallSegment seg = wallBetween(grid, x, z, grid, x + 1, z);
                 if (seg == null) {
                     z++;
                     continue;
                 }
                 int runLength = 1;
                 while (z + runLength < ColumnGrid.SIZE) {
-                    WallSegment next = wallBetween(grid, x, z + runLength, x + 1, z + runLength);
+                    WallSegment next = wallBetween(grid, x, z + runLength, grid, x + 1, z + runLength);
                     if (next == null || !next.sameFaceAs(seg)) {
                         break;
                     }
@@ -128,14 +133,14 @@ public final class GreedyMesher {
         for (int z = 0; z < ColumnGrid.SIZE - 1; z++) {
             int x = 0;
             while (x < ColumnGrid.SIZE) {
-                WallSegment seg = wallBetween(grid, x, z, x, z + 1);
+                WallSegment seg = wallBetween(grid, x, z, grid, x, z + 1);
                 if (seg == null) {
                     x++;
                     continue;
                 }
                 int runLength = 1;
                 while (x + runLength < ColumnGrid.SIZE) {
-                    WallSegment next = wallBetween(grid, x + runLength, z, x + runLength, z + 1);
+                    WallSegment next = wallBetween(grid, x + runLength, z, grid, x + runLength, z + 1);
                     if (next == null || !next.sameFaceAs(seg)) {
                         break;
                     }
@@ -147,14 +152,89 @@ public final class GreedyMesher {
         }
     }
 
+    // ---- cross-node boundary stitching (same LOD level only) --------------------------
+
+    /**
+     * Meshes the seam between two horizontally-adjacent, <em>same-level</em> nodes'
+     * grids: {@code west}'s column {@code SIZE-1} against {@code east}'s column
+     * {@code 0}, for every {@code z}. Mirrors {@link #meshWallsAlongX} exactly, except
+     * the two sides of each comparison come from different grids instead of the same
+     * one, and the resulting quads are always anchored at local X {@code 0} — i.e. they
+     * belong in {@code east}'s coordinate frame (the caller is responsible for
+     * appending the result to {@code east}'s own quad list, not {@code west}'s).
+     * <p>
+     * Only closes seams between nodes of the <em>same</em> LOD level within the same
+     * region — a node bordering a differently-leveled neighbor (a LOD band transition)
+     * or a neighbor in an adjacent region isn't handled here; both remain open (see
+     * {@code PROGRESS.md}, "Баг 9").
+     */
+    public List<PackedQuad> meshBoundaryAlongX(ColumnGrid west, ColumnGrid east) {
+        List<PackedQuad> out = new ArrayList<>();
+        int z = 0;
+        while (z < ColumnGrid.SIZE) {
+            WallSegment seg = wallBetween(west, ColumnGrid.SIZE - 1, z, east, 0, z);
+            if (seg == null) {
+                z++;
+                continue;
+            }
+            int runLength = 1;
+            while (z + runLength < ColumnGrid.SIZE) {
+                WallSegment next = wallBetween(west, ColumnGrid.SIZE - 1, z + runLength, east, 0, z + runLength);
+                if (next == null || !next.sameFaceAs(seg)) {
+                    break;
+                }
+                runLength++;
+            }
+            emitWallRun(out, seg, /* runCoordStart */ z, runLength);
+            z += runLength;
+        }
+        return out;
+    }
+
+    /**
+     * Meshes the seam between two vertically-adjacent (in the Z sense), <em>same-level</em>
+     * nodes' grids: {@code south}'s row {@code SIZE-1} against {@code north}'s row
+     * {@code 0}, for every {@code x}. See {@link #meshBoundaryAlongX} for the general
+     * shape of this — same caveats apply, and the resulting quads belong in
+     * {@code north}'s coordinate frame (local Z {@code 0}).
+     */
+    public List<PackedQuad> meshBoundaryAlongZ(ColumnGrid south, ColumnGrid north) {
+        List<PackedQuad> out = new ArrayList<>();
+        int x = 0;
+        while (x < ColumnGrid.SIZE) {
+            WallSegment seg = wallBetween(south, x, ColumnGrid.SIZE - 1, north, x, 0);
+            if (seg == null) {
+                x++;
+                continue;
+            }
+            int runLength = 1;
+            while (x + runLength < ColumnGrid.SIZE) {
+                WallSegment next = wallBetween(south, x + runLength, ColumnGrid.SIZE - 1, north, x + runLength, 0);
+                if (next == null || !next.sameFaceAs(seg)) {
+                    break;
+                }
+                runLength++;
+            }
+            emitWallRun(out, seg, /* runCoordStart */ x, runLength);
+            x += runLength;
+        }
+        return out;
+    }
+
     /**
      * Describes the exposed vertical face (if any) between two adjacent cells, oriented
      * so the taller column's outward-facing side is what gets meshed (the shorter
      * column has nothing to hide behind it, from above).
+     * <p>
+     * {@code lowGrid}/{@code highGrid} are the same object for interior boundaries
+     * (both cells live in this node's own grid) but different objects for cross-node
+     * boundary stitching (see {@link #meshBoundaryAlongX} / {@link #meshBoundaryAlongZ}),
+     * where {@code lowGrid} is the neighboring node's grid and {@code highGrid} is this
+     * node's own grid (or vice versa, per the caller's world-space ordering).
      */
-    private WallSegment wallBetween(ColumnGrid grid, int lowSideX, int lowSideZ, int highSideX, int highSideZ) {
-        boolean aPresent = grid.present(lowSideX, lowSideZ);
-        boolean bPresent = grid.present(highSideX, highSideZ);
+    private WallSegment wallBetween(ColumnGrid lowGrid, int lowSideX, int lowSideZ, ColumnGrid highGrid, int highSideX, int highSideZ) {
+        boolean aPresent = lowGrid.present(lowSideX, lowSideZ);
+        boolean bPresent = highGrid.present(highSideX, highSideZ);
         // BUGFIX: previously only "both absent" bailed out here, and a lone absent side was
         // given a Integer.MIN_VALUE sentinel height below, letting the wall span from the
         // real (present) column's height all the way down to MIN_VALUE. When the real height
@@ -163,14 +243,14 @@ public final class GreedyMesher {
         // it lands as a legitimate ~2.1 billion-block-tall wall, which emitWallRun then
         // dutifully chops into ~34 million MAX_WALL_QUAD_HEIGHT-tall quads from a single cell
         // boundary. We have no idea what a not-yet-generated neighbor's height actually is,
-        // so - consistent with this class's own scope note that inter-node stitching is a
-        // later stage's problem, not this one's - the right answer is simply not to guess:
-        // skip the wall rather than fabricate one against absent data.
+        // so the right answer is simply not to guess: skip the wall rather than fabricate one
+        // against absent data. This applies just as much to a genuinely missing NEIGHBOR node
+        // (see meshBoundaryAlongX/Z) as to an absent cell within the same grid.
         if (!aPresent || !bPresent) {
             return null;
         }
-        int aHeight = grid.height(lowSideX, lowSideZ);
-        int bHeight = grid.height(highSideX, highSideZ);
+        int aHeight = lowGrid.height(lowSideX, lowSideZ);
+        int bHeight = highGrid.height(highSideX, highSideZ);
         if (aHeight == bHeight) {
             return null; // flush, nothing to fill
         }
@@ -187,8 +267,8 @@ public final class GreedyMesher {
 
         int lowY = Math.min(aHeight, bHeight);
         int highY = Math.max(aHeight, bHeight);
-        int material = aTaller ? grid.material(lowSideX, lowSideZ) : grid.material(highSideX, highSideZ);
-        int light = aTaller ? grid.light(lowSideX, lowSideZ) : grid.light(highSideX, highSideZ);
+        int material = aTaller ? lowGrid.material(lowSideX, lowSideZ) : highGrid.material(highSideX, highSideZ);
+        int light = aTaller ? lowGrid.light(lowSideX, lowSideZ) : highGrid.light(highSideX, highSideZ);
         // The boundary plane sits at the same coordinate regardless of which side is taller —
         // anchor it at the higher-index cell consistently, so the shader only needs `axis` to
         // know which way the quad faces.
