@@ -40,6 +40,16 @@ public final class LodGpuPipeline implements AutoCloseable {
     private int dummyVertexArray;
     private boolean initialized;
 
+    // FIX (stage-4 gap, see PROGRESS.md "baseLodDistance vs lodRenderDistance"): these used
+    // to be the same value - ExceptionalVisionClient passed the "lodRenderDistance" config
+    // straight through as baseLodDistance, so the full-detail level-0 band spanned the
+    // *entire* configured render distance instead of a band comparable to vanilla's own
+    // chunk render distance, and the top (region-root) level had no far cutoff at all (drew
+    // to infinity, ignoring the config completely). Now lodRenderDistance is the single
+    // source of truth for "how far LOD should be visible" (see #setLodDistanceSettings,
+    // which derives baseLodDistance from it), and both are sent to the shader separately -
+    // see quad_cull.comp for how each is actually used.
+    private float lodRenderDistance = 2048.0f;
     private float baseLodDistance = 128.0f;
     private int maxLodLevel = 5; // must match LodBuilder.MAX_LEVEL
 
@@ -73,9 +83,25 @@ public final class LodGpuPipeline implements AutoCloseable {
         return initialized;
     }
 
-    public void setLodDistanceSettings(float baseLodDistance, int maxLodLevel) {
-        this.baseLodDistance = baseLodDistance;
+    /**
+     * @param lodRenderDistance total distance (blocks) out to which LOD geometry should be
+     *                          visible at all - this is exactly {@code ExceptionalVisionConfig
+     *                          .LOD_RENDER_DISTANCE}'s meaning, and is now also enforced as a
+     *                          hard cutoff in the shader (see quad_cull.comp), not just a band
+     *                          boundary that the top level ignored.
+     * @param maxLodLevel       see {@code LodBuilder.MAX_LEVEL} - the region-root level.
+     */
+    public void setLodDistanceSettings(float lodRenderDistance, int maxLodLevel) {
+        this.lodRenderDistance = lodRenderDistance;
         this.maxLodLevel = maxLodLevel;
+        // Bands double per level starting from baseLodDistance at level 0 (see quad_cull.comp),
+        // so the regular (non-top) bands span [0, baseLodDistance * 2^(maxLodLevel-1)) in total.
+        // Solving for baseLodDistance so that upper bound lands exactly on lodRenderDistance
+        // keeps "how far LOD reaches" tied to the config regardless of maxLodLevel, instead of
+        // baseLodDistance (a detail/performance knob - how wide the full-detail band is) being
+        // conflated with lodRenderDistance (a visibility knob - how far out LOD draws at all).
+        int levelsBelowTop = Math.max(0, maxLodLevel - 1);
+        this.baseLodDistance = lodRenderDistance / (float) (1 << levelsBelowTop);
     }
 
     /**
@@ -158,6 +184,7 @@ public final class LodGpuPipeline implements AutoCloseable {
 
         cullProgram.setUniform3f("cameraWorldPos", cameraWorldPos.x(), cameraWorldPos.y(), cameraWorldPos.z());
         cullProgram.setUniform1f("baseLodDistance", baseLodDistance);
+        cullProgram.setUniform1f("lodRenderDistance", lodRenderDistance);
         cullProgram.setUniform1f("nearCutoffDistance", nearCutoffDistance);
         cullProgram.setUniform1ui("nodeCount", buffers.nodeCount());
         cullProgram.setUniform1ui("maxLodLevel", maxLodLevel);

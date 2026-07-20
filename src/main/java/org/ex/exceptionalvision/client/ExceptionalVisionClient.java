@@ -97,6 +97,10 @@ public final class ExceptionalVisionClient {
                 return;
             }
 
+            // FIX (stage-4 gap): setLodDistanceSettings now derives the level-0 band width
+            // from this value internally instead of taking it as that band width directly -
+            // see LodGpuPipeline#setLodDistanceSettings and quad_cull.comp for what changed
+            // and why (PROGRESS.md, stage-4 "baseLodDistance vs lodRenderDistance").
             GPU_PIPELINE.setLodDistanceSettings(ExceptionalVisionConfig.LOD_RENDER_DISTANCE.get(), 5);
             LodRenderManager renderManager = new LodRenderManager(GPU_PIPELINE);
             NeoForge.EVENT_BUS.addListener(renderManager::onRenderLevelStage);
