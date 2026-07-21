@@ -35,6 +35,10 @@ uniform vec3 cameraWorldPos; // subtracted before the projection multiply - keep
 
 flat out uint vMaterialIndex;
 out float vLight;
+out float vDistanceToCamera; // FIX: lets lod_quad.frag dither-fade quads near lodRenderDistance
+                              // instead of them hard-popping out of existence at the cutoff -
+                              // see that shader for why. Computed here rather than recomputed
+                              // per-fragment since cameraRelative is already available.
 
 const vec2 CORNERS[6] = vec2[6](
     vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0),
@@ -100,4 +104,5 @@ void main() {
 
     vMaterialIndex = materialIndex;
     vLight = float(light) / 15.0;
+    vDistanceToCamera = length(cameraRelative);
 }

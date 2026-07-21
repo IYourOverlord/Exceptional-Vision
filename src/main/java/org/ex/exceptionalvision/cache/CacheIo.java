@@ -50,14 +50,47 @@ final class CacheIo {
         });
     }
 
+    // FIX (found via a real playtest log): even after LodCacheLoader stopped holding its
+    // MappedByteBuffers alive for the whole pipeline session (see that class's FIX note -
+    // the original, narrower cause of this same symptom), a *second* player report showed
+    // the exact same AccessDeniedException on this rename, this time for nodes.bin at an
+    // ordinary world-quit compaction with no `/ev reload` involved at all. That rules out
+    // the specific stale-mapping cause a second time - on Windows, a file that was just
+    // written to can end up transiently locked by something entirely outside this
+    // codebase's control (real-time antivirus scanning a newly-written file being the most
+    // common cause; a search indexer or backup tool doing the same is also possible) for a
+    // brief window after the write completes, regardless of how careful the JVM-side
+    // mmap/GC discipline is. Retrying the rename itself, rather than chasing down every
+    // possible external holder one at a time, is the actually-robust fix: it's cheap deep
+    // in the failure path (this only ever runs after a real AccessDeniedException, not on
+    // the common success path) and works no matter which external process transiently
+    // holds the lock.
+    private static final int MAX_RENAME_RETRIES = 5;
+    private static final long RENAME_RETRY_DELAY_MS = 100;
+
     private static void moveAtomicallyIfPossible(Path tmp, Path target) throws IOException {
-        try {
-            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-            // Some filesystems (notably certain network mounts) don't support atomic
-            // rename across the move; fall back to a plain (non-atomic) replace rather
-            // than failing the whole cache write.
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        for (int attempt = 1; ; attempt++) {
+            try {
+                try {
+                    Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    // Some filesystems (notably certain network mounts) don't support atomic
+                    // rename across the move; fall back to a plain (non-atomic) replace rather
+                    // than failing the whole cache write.
+                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+                return;
+            } catch (java.nio.file.AccessDeniedException e) {
+                if (attempt >= MAX_RENAME_RETRIES) {
+                    throw e;
+                }
+                try {
+                    Thread.sleep(RENAME_RETRY_DELAY_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
         }
     }
 

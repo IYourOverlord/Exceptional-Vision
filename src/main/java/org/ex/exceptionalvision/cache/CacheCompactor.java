@@ -181,9 +181,13 @@ public final class CacheCompactor {
     }
 
     private List<NodeData> readAllNodes(Path nodesFile) throws IOException {
-        // Deliberately NOT CacheIo.mapReadOnly here (unlike LodCacheLoader, which keeps its
-        // mapping alive for the GPU upload) — this method's caller (compactNodes) turns
-        // around and atomically replaces this exact file a few lines later. On Windows, a
+        // Deliberately NOT CacheIo.mapReadOnly here (unlike LodCacheLoader, which used to
+        // keep its mapping alive for the GPU upload until that turned out to be exactly
+        // what caused a second `/ev reload`'s compaction to fail with AccessDeniedException
+        // on Windows - see LodCacheLoader#load's FIX note. LodCacheLoader now copies out of
+        // its mapping immediately instead of holding it, for the same reason this method
+        // avoids mmap entirely) - this method's caller (compactNodes) turns around and
+        // atomically replaces this exact file a few lines later. On Windows, a
         // MappedByteBuffer keeps the underlying file locked until the JVM actually unmaps it
         // (there is no explicit unmap in the public API — it happens whenever GC reclaims the
         // buffer, which is not guaranteed to happen in time), so the subsequent

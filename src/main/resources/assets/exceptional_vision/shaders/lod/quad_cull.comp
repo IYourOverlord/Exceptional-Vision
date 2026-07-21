@@ -51,14 +51,17 @@ uniform vec3 cameraWorldPos;   // BUGFIX: also used to translate node AABBs into
                                 // absolute-world-space AABBs against it was comparing coordinates in
                                 // two different spaces, which only coincidentally passed near world
                                 // origin and flickered in/out with camera rotation everywhere else.
-uniform float baseLodDistance;  // width (blocks) of the level-0 band; band width doubles per level above
-                                 // that. NOT the same thing as lodRenderDistance below - this is a
-                                 // detail/performance knob (how quickly quality falls off with distance),
-                                 // derived FROM lodRenderDistance on the Java side (see
-                                 // LodGpuPipeline#setLodDistanceSettings) rather than being set to it
-                                 // directly. See PROGRESS.md, stage-4 "baseLodDistance vs
-                                 // lodRenderDistance" for why these were conflated before and what this
-                                 // split fixes.
+uniform float baseLodDistance;  // width (blocks) of the level-0 band, measured starting right
+                                 // where nearCutoffDistance ends (not from world distance 0 -
+                                 // see the FIX note in lodLevelAppropriate below for why).
+                                 // Band width doubles per level above that. NOT the same thing
+                                 // as lodRenderDistance below - this is a detail/performance
+                                 // knob (how quickly quality falls off with distance), derived
+                                 // FROM lodRenderDistance on the Java side (see
+                                 // LodGpuPipeline#setLodDistanceSettings) rather than being set
+                                 // to it directly. See PROGRESS.md, stage-4 "baseLodDistance vs
+                                 // lodRenderDistance" for why these were conflated before and
+                                 // what this split fixes.
 uniform float lodRenderDistance; // FIX (stage-4 gap): hard cutoff (blocks) beyond which NO LOD geometry
                                   // draws, regardless of level - this is what the "LOD render distance"
                                   // config option actually means to the player. Before this uniform
@@ -89,22 +92,38 @@ bool aabbInFrustum(vec3 mn, vec3 mx) {
 }
 
 // Simple distance-band LOD selection: level L is the appropriate detail level within
-// [baseLodDistance * 2^(L-1), baseLodDistance * 2^L) from the camera (level 0 starts at
-// distance 0). This is a deliberately simple placeholder policy for the "basic" stage-4
-// pipeline - a real screen-space-error metric is stage-5 territory.
+// [baseLodDistance * 2^(L-1), baseLodDistance * 2^L) *past the near cutoff* (level 0
+// starts right where the near cutoff ends, not at world distance 0 - see FIX note below).
+// This is a deliberately simple placeholder policy for the "basic" stage-4 pipeline - a
+// real screen-space-error metric is stage-5 territory.
 bool lodLevelAppropriate(NodeData node) {
     vec3 center = 0.5 * (node.aabbMin.xyz + node.aabbMax.xyz);
     float dist = distance(cameraWorldPos, center);
+    // FIX (found via a real playtest log - see PROGRESS.md "level 0 swallowed by the near
+    // cutoff"): band boundaries used to be measured from world distance 0, but
+    // nearCutoffDistance is set every frame from the player's *live* vanilla render-distance
+    // option (see LodRenderManager), while baseLodDistance is derived once from the
+    // (static, config-driven) lodRenderDistance at startup and never adapts to it. At any
+    // vanilla render distance large enough that nearCutoffDistance >= baseLodDistance
+    // (12+ chunks at this mod's shipped defaults), level 0's entire [0, baseLodDistance)
+    // band fell *inside* the near cutoff and got skipped by the check in main() below no
+    // matter what - level 0 never drew at all, leaving a visible ring of missing LOD
+    // geometry right around the player. Measuring from nearCutoffDistance instead of 0
+    // guarantees level 0 always gets its full band width immediately past the cutoff,
+    // regardless of what the player's render-distance setting happens to be.
+    float effectiveDist = max(dist - nearCutoffDistance, 0.0);
     float minDist = node.lodLevel == 0u ? 0.0 : baseLodDistance * float(1u << (node.lodLevel - 1u));
     if (node.lodLevel >= maxLodLevel) {
         // FIX (stage-4 gap): top level used to cover everything beyond its band with no
         // upper bound at all, i.e. it drew regardless of how far away it was - changing
         // lodRenderDistance in the config had no effect on this level. Now it stops at
-        // the same hard cutoff every other level respects.
-        return dist >= minDist && dist < lodRenderDistance;
+        // the same hard cutoff every other level respects. This comparison intentionally
+        // uses the *unshifted* dist, not effectiveDist - lodRenderDistance is an absolute
+        // "how far from the camera" limit, not one more band relative to the near cutoff.
+        return effectiveDist >= minDist && dist < lodRenderDistance;
     }
     float maxDist = baseLodDistance * float(1u << node.lodLevel);
-    return dist >= minDist && dist < maxDist;
+    return effectiveDist >= minDist && effectiveDist < maxDist;
 }
 
 void main() {

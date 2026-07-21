@@ -94,13 +94,22 @@ public final class LodGpuPipeline implements AutoCloseable {
     public void setLodDistanceSettings(float lodRenderDistance, int maxLodLevel) {
         this.lodRenderDistance = lodRenderDistance;
         this.maxLodLevel = maxLodLevel;
-        // Bands double per level starting from baseLodDistance at level 0 (see quad_cull.comp),
-        // so the regular (non-top) bands span [0, baseLodDistance * 2^(maxLodLevel-1)) in total.
-        // Solving for baseLodDistance so that upper bound lands exactly on lodRenderDistance
-        // keeps "how far LOD reaches" tied to the config regardless of maxLodLevel, instead of
-        // baseLodDistance (a detail/performance knob - how wide the full-detail band is) being
-        // conflated with lodRenderDistance (a visibility knob - how far out LOD draws at all).
-        int levelsBelowTop = Math.max(0, maxLodLevel - 1);
+        // Bands double per level starting from baseLodDistance at level 0 (see quad_cull.comp).
+        // Regular levels are 0..maxLodLevel-1; the top (region-root) level is maxLodLevel
+        // itself and, like every level below it, is exactly as wide as the level before it
+        // doubled - i.e. the doubling series continues one more step for the top level rather
+        // than stopping dead at the last regular level's upper bound. So the *whole* series,
+        // top level included, spans [0, baseLodDistance * 2^maxLodLevel) in total; solving for
+        // baseLodDistance so that upper bound lands on lodRenderDistance keeps "how far LOD
+        // reaches" tied to the config regardless of maxLodLevel.
+        //
+        // FIX (found via a real playtest log, not just reasoning - see PROGRESS.md "top-level
+        // band collapses to zero width"): dividing by 2^(maxLodLevel-1) instead of 2^maxLodLevel
+        // makes the top level's own band [baseLodDistance*2^(maxLodLevel-1), lodRenderDistance)
+        // mathematically empty, since baseLodDistance*2^(maxLodLevel-1) == lodRenderDistance
+        // exactly in that version - the region-root level would *never* draw, and LOD would
+        // stop dead at whatever the last regular level's distance is, with nothing beyond it.
+        int levelsBelowTop = Math.max(0, maxLodLevel);
         this.baseLodDistance = lodRenderDistance / (float) (1 << levelsBelowTop);
     }
 
@@ -224,6 +233,7 @@ public final class LodGpuPipeline implements AutoCloseable {
             MemoryUtil.memFree(matrixBuffer);
         }
         drawProgram.setUniform3f("cameraWorldPos", cameraWorldPos.x(), cameraWorldPos.y(), cameraWorldPos.z());
+        drawProgram.setUniform1f("lodRenderDistance", lodRenderDistance);
 
         // GL_DRAW_INDIRECT_BUFFER is bound (see LodGpuBuffers#bindForDraw) - the "indirect"
         // argument here is a BYTE OFFSET into that buffer, not a client-memory pointer.

@@ -1,7 +1,12 @@
 package org.ex.exceptionalvision.client;
 
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.context.CommandContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -9,6 +14,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import org.ex.exceptionalvision.ExceptionalVision;
@@ -77,6 +83,12 @@ public final class ExceptionalVisionClient {
     /** Called once from {@link ExceptionalVision}'s constructor, only on {@code Dist.CLIENT}. */
     public static void init(IEventBus modEventBus) {
         modEventBus.addListener(ExceptionalVisionClient::onClientSetup);
+        // FIX: RegisterClientCommandsEvent fires on NeoForge.EVENT_BUS (the game bus), same
+        // as LevelEvent.Load/Unload below - NOT the mod event bus. Registering it on
+        // modEventBus threw "Listener for event class ... takes an argument that is not
+        // valid for this bus" at load, crashing the mod entirely (confirmed via a real
+        // playtest crash screenshot - see PROGRESS.md).
+        NeoForge.EVENT_BUS.addListener(ExceptionalVisionClient::onRegisterCommands);
         NeoForge.EVENT_BUS.addListener(ExceptionalVisionClient::onLevelLoad);
         NeoForge.EVENT_BUS.addListener(ExceptionalVisionClient::onLevelUnload);
     }
@@ -117,6 +129,50 @@ public final class ExceptionalVisionClient {
         if (event.getLevel() instanceof ClientLevel clientLevel && clientLevel.dimension().equals(activeDimension)) {
             stopPipeline();
         }
+    }
+
+    /**
+     * Registers {@code /ev reload}. Added in response to a real playtest report: the
+     * background LOD builder (see {@link #onRegionCached}) catches up with a large
+     * already-explored area automatically within a few seconds of joining a world (see
+     * the {@code exceptional-vision-lod-builder} log lines this produces), but there was
+     * previously no way to force that catch-up on demand short of leaving and
+     * re-entering the world/dimension entirely - slow, and easy to mistake for a
+     * necessary step rather than just "wait a few more seconds", since there was no
+     * feedback in-game about whether the pipeline was still working.
+     * <p>
+     * <b>Not verified against a real NeoForge jar in this session</b> - same caveat as
+     * the rest of this class (see its javadoc). {@link RegisterClientCommandsEvent} and
+     * {@link CommandSourceStack#sendSuccess} are used here per NeoForge 1.21.x's public
+     * Javadoc, not from a compiled/run check.
+     */
+    private static void onRegisterCommands(RegisterClientCommandsEvent event) {
+        CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
+        dispatcher.register(Commands.literal("ev")
+                .then(Commands.literal("reload")
+                        .executes(ExceptionalVisionClient::onReloadCommand)));
+    }
+
+    private static int onReloadCommand(CommandContext<CommandSourceStack> ctx) {
+        ResourceKey<Level> dimension = activeDimension;
+        if (dimension == null) {
+            ctx.getSource().sendFailure(Component.literal(
+                    "Exceptional Vision: LOD pipeline is not running (not in a singleplayer/LAN world, or it failed to start - check the log)."));
+            return 0;
+        }
+
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                        "Exceptional Vision: reloading LOD pipeline for " + dimension.location()
+                                + " - this rebuilds/re-uploads the whole cache in the background, watch the log for progress."),
+                false);
+
+        // Reuses startPipeline's existing stopPipeline()-then-start sequence and the
+        // COMPACTIONS_IN_PROGRESS wait it already does for exactly this same-dimension
+        // re-entry race (see that field's javadoc) - a forced reload is architecturally
+        // identical to a portal-and-immediately-back dimension re-entry, so it doesn't
+        // need its own separate path.
+        startPipeline(dimension);
+        return 1;
     }
 
     private static void startPipeline(ResourceKey<Level> dimension) {
