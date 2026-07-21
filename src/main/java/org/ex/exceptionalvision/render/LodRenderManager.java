@@ -22,11 +22,10 @@ import org.joml.Vector3f;
  * event instead of a mixin into internals. This is a strictly safer choice for
  * something that can't be verified by compiling against the real jar here.
  * <p>
- * Not yet registered anywhere - see {@code PROGRESS.md} for the remaining
- * {@code ExceptionalVision} wiring (subscribing this to the mod event bus, calling
- * {@link LodGpuPipeline#init()} at the right point in the client lifecycle, and
- * connecting {@code LodPipeline}'s {@code onRegionCached} hook to
- * {@link LodGpuPipeline#uploadCache}).
+ * Registered on {@code NeoForge.EVENT_BUS} by {@code ExceptionalVisionClient}, which
+ * also owns calling {@link LodGpuPipeline#init()} at the right point in the client
+ * lifecycle and connecting {@code LodPipeline}'s {@code onRegionCached} hook to
+ * {@link LodGpuPipeline#uploadCache} - see that class.
  */
 public final class LodRenderManager {
 
@@ -37,6 +36,27 @@ public final class LodRenderManager {
     // render-distance culling and our own frustum culling, so nothing pops at the seam
     // as the camera turns.
     private static final int NEAR_CUTOFF_MARGIN_CHUNKS = 1;
+
+    // FIX (found via a real playtest log/screenshots - see PROGRESS.md "LOD clipped by
+    // vanilla's own far plane"): vanilla's per-frame projection matrix has its far
+    // clipping plane tied to the player's configured render distance. Reusing it as-is
+    // for the LOD pass (both for gl_Position in lod_quad.vert and for the frustum
+    // planes fed to quad_cull.comp) silently clipped LOD geometry at roughly that
+    // vanilla distance no matter what lodRenderDistance/nearCutoffDistance said - at 7
+    // chunks, that left almost no valid window between nearCutoffDistance and vanilla's
+    // own far plane, so nothing drew near the ground; from height, only a small disc
+    // directly below showed, because the far plane is measured along the view ray, and
+    // a downward ray to the ground is short even from modest altitude. See
+    // FrustumExtractor#withExtendedFarPlane for the fix and its own caveats.
+    //
+    // assumedNearPlane: vanilla GameRenderer's long-standing near-plane constant - not
+    // independently re-verified against a real build in this session, worth a debug
+    // print of the original projection matrix's m22/m32 on first real playtest to
+    // confirm (see FrustumExtractor#withExtendedFarPlane's javadoc).
+    private static final float ASSUMED_VANILLA_NEAR_PLANE = 0.05f;
+    // Extra buffer beyond whatever the far plane needs to reach, purely to avoid an
+    // LOD quad's far edge landing exactly on the new clip plane and flickering.
+    private static final float FAR_PLANE_SAFETY_MARGIN_BLOCKS = 64.0f;
 
     private final LodGpuPipeline pipeline;
 
@@ -57,18 +77,29 @@ public final class LodRenderManager {
             var cameraPos = camera.getPosition(); // net.minecraft.world.phys.Vec3
             Vector3f cameraWorldPos = new Vector3f((float) cameraPos.x, (float) cameraPos.y, (float) cameraPos.z);
 
-            // Minecraft's modelViewMatrix here is rotation-only (no camera translation) -
-            // everything is already rendered camera-relative, which is exactly what
-            // lod_quad.vert also assumes (see its "cameraWorldPos" subtraction). Combining
-            // it with the projection matrix the same way vanilla does keeps our geometry
-            // aligned with everything else in the frame.
-            Matrix4f viewProjection = new Matrix4f(event.getProjectionMatrix()).mul(event.getModelViewMatrix());
-
             // Read every frame, not cached at init - the player can change this in the
             // options menu (or via a server-imposed clamp) mid-session.
             int renderDistanceChunks = Minecraft.getInstance().options.getEffectiveRenderDistance();
             float nearCutoffBlocks = (renderDistanceChunks + NEAR_CUTOFF_MARGIN_CHUNKS) * 16.0f;
             pipeline.setNearCutoffDistance(nearCutoffBlocks);
+
+            // The far plane needs to reach at least lodRenderDistance (the whole point of
+            // this pass) - and, as a floor, at least as far as vanilla's own render
+            // distance already reaches (nearCutoffBlocks is a close approximation of that,
+            // see its own comment above), so this never accidentally SHRINKS vanilla's far
+            // plane on setups where lodRenderDistance has been configured smaller than the
+            // player's vanilla render distance.
+            float minFarBlocks = Math.max(pipeline.lodRenderDistance(), nearCutoffBlocks) + FAR_PLANE_SAFETY_MARGIN_BLOCKS;
+            Matrix4f lodProjection = FrustumExtractor.withExtendedFarPlane(
+                    event.getProjectionMatrix(), minFarBlocks, ASSUMED_VANILLA_NEAR_PLANE);
+
+            // Minecraft's modelViewMatrix here is rotation-only (no camera translation) -
+            // everything is already rendered camera-relative, which is exactly what
+            // lod_quad.vert also assumes (see its "cameraWorldPos" subtraction). Combining
+            // it with the projection matrix the same way vanilla does keeps our geometry
+            // aligned with everything else in the frame - using lodProjection instead of
+            // event.getProjectionMatrix() directly is exactly the fix described above.
+            Matrix4f viewProjection = lodProjection.mul(event.getModelViewMatrix());
 
             pipeline.renderLodFrame(viewProjection, cameraWorldPos);
         } catch (RuntimeException e) {

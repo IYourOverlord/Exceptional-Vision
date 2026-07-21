@@ -84,6 +84,16 @@ public final class LodGpuPipeline implements AutoCloseable {
     }
 
     /**
+     * Current {@code lodRenderDistance} (blocks) - see {@link #setLodDistanceSettings}.
+     * {@link LodRenderManager} needs this to make sure the projection matrix it builds
+     * for the LOD pass has a far plane that reaches at least this far; see that class's
+     * javadoc on {@code buildLodProjection} for why the vanilla one on its own doesn't.
+     */
+    public float lodRenderDistance() {
+        return lodRenderDistance;
+    }
+
+    /**
      * @param lodRenderDistance total distance (blocks) out to which LOD geometry should be
      *                          visible at all - this is exactly {@code ExceptionalVisionConfig
      *                          .LOD_RENDER_DISTANCE}'s meaning, and is now also enforced as a
