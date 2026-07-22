@@ -46,22 +46,44 @@ public final class LodCacheWriter {
     /** Bytes read at a time while hashing a region file; keeps memory use flat regardless of file size. */
     private static final int HASH_CHUNK_BYTES = 1 << 16;
 
+    // BUG FIX (see PROGRESS.md "flickering/disappearing LOD quads during world gen"):
+    // LodBuilderExecutor runs multiple builder threads in parallel, and each one that
+    // finishes a region calls back into appendRegion/patchRegion independently. Every
+    // write path below does read-modify-write on quads.bin/nodes.bin/index.json
+    // (read the current count, then append at that offset, then write the new count)
+    // with no locking at all. Two regions finishing within the same few milliseconds -
+    // which the logs show happening routinely during initial world generation - could
+    // both read the same "current quad count", then both write their fresh quads at
+    // that same offset, silently clobbering each other and/or corrupting the trailing
+    // quad count. The result is exactly what was observed in-game: geometry that
+    // flickers or vanishes, because the on-disk cache itself became inconsistent, and
+    // the GPU upload faithfully reflects that corruption.
+    //
+    // All methods that mutate the on-disk cache files are synchronized on this single
+    // lock so only one region's write can be in flight at a time. This trades a little
+    // parallelism in the (already backgrounded, off the render thread) write path for
+    // correctness; the actual LOD-building work (LodBuilderExecutor's downsampling)
+    // still runs fully in parallel; only the final "commit to disk" step is serialized.
+    private final Object writeLock = new Object();
+
     /**
      * Writes a brand-new cache for a dimension, discarding whatever was there before.
      * Used for the first-ever build and for full-world (re)imports.
      */
     public void writeFull(Path worldDir, String dimensionId, String modVersion,
                           List<NodeData> nodes, List<PackedQuad> quads, List<RegionCacheEntry> regionsProcessed) throws IOException {
-        Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
+        synchronized (writeLock) {
+            Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
 
-        CacheIo.writeAtomic(LodCacheFormat.nodesFile(dimDir), channel -> writeNodes(channel, nodes));
-        CacheIo.writeAtomic(LodCacheFormat.quadsFile(dimDir), channel -> writeQuads(channel, quads));
+            CacheIo.writeAtomic(LodCacheFormat.nodesFile(dimDir), channel -> writeNodes(channel, nodes));
+            CacheIo.writeAtomic(LodCacheFormat.quadsFile(dimDir), channel -> writeQuads(channel, quads));
 
-        CacheIndex index = new CacheIndex(LodCacheFormat.CURRENT_FORMAT_VERSION, modVersion, dimensionId, regionsProcessed);
-        index.writeTo(LodCacheFormat.indexFile(dimDir));
+            CacheIndex index = new CacheIndex(LodCacheFormat.CURRENT_FORMAT_VERSION, modVersion, dimensionId, regionsProcessed);
+            index.writeTo(LodCacheFormat.indexFile(dimDir));
 
-        ExceptionalVision.LOGGER.info("Wrote LOD cache for {}: {} nodes, {} quads, {} regions",
-                dimensionId, nodes.size(), quads.size(), regionsProcessed.size());
+            ExceptionalVision.LOGGER.info("Wrote LOD cache for {}: {} nodes, {} quads, {} regions",
+                    dimensionId, nodes.size(), quads.size(), regionsProcessed.size());
+        }
     }
 
     /**
@@ -71,27 +93,29 @@ public final class LodCacheWriter {
      * them, then calls {@link #patchNode}.
      */
     public long appendQuads(Path worldDir, String dimensionId, List<PackedQuad> newQuads) throws IOException {
-        if (newQuads.isEmpty()) {
-            return currentQuadCount(worldDir, dimensionId);
-        }
-        Path quadsFile = LodCacheFormat.quadsFile(LodCacheFormat.dimensionCacheDir(worldDir, dimensionId));
-        ensureQuadsFileExists(quadsFile);
-
-        try (FileChannel channel = CacheIo.openReadWrite(quadsFile)) {
-            long existingCount = readQuadCount(channel);
-            long appendOffset = existingCount;
-
-            ByteBuffer payload = ByteBuffer.allocate(newQuads.size() * PackedQuad.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-            for (PackedQuad quad : newQuads) {
-                payload.putInt(quad.packed0());
-                payload.putInt(quad.packed1());
+        synchronized (writeLock) {
+            if (newQuads.isEmpty()) {
+                return currentQuadCount(worldDir, dimensionId);
             }
-            payload.flip();
-            channel.write(payload, LodCacheFormat.QUADS_HEADER_BYTES + appendOffset * PackedQuad.BYTES);
+            Path quadsFile = LodCacheFormat.quadsFile(LodCacheFormat.dimensionCacheDir(worldDir, dimensionId));
+            ensureQuadsFileExists(quadsFile);
 
-            writeQuadCount(channel, existingCount + newQuads.size());
-            channel.force(true);
-            return appendOffset;
+            try (FileChannel channel = CacheIo.openReadWrite(quadsFile)) {
+                long existingCount = readQuadCount(channel);
+                long appendOffset = existingCount;
+
+                ByteBuffer payload = ByteBuffer.allocate(newQuads.size() * PackedQuad.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+                for (PackedQuad quad : newQuads) {
+                    payload.putInt(quad.packed0());
+                    payload.putInt(quad.packed1());
+                }
+                payload.flip();
+                channel.write(payload, LodCacheFormat.QUADS_HEADER_BYTES + appendOffset * PackedQuad.BYTES);
+
+                writeQuadCount(channel, existingCount + newQuads.size());
+                channel.force(true);
+                return appendOffset;
+            }
         }
     }
 
@@ -102,23 +126,25 @@ public final class LodCacheWriter {
      * {@code nodeIndex} unless it was out of range, in which case it is clamped to "append").
      */
     public int patchNode(Path worldDir, String dimensionId, int nodeIndex, NodeData node) throws IOException {
-        Path nodesFile = LodCacheFormat.nodesFile(LodCacheFormat.dimensionCacheDir(worldDir, dimensionId));
-        ensureNodesFileExists(nodesFile);
+        synchronized (writeLock) {
+            Path nodesFile = LodCacheFormat.nodesFile(LodCacheFormat.dimensionCacheDir(worldDir, dimensionId));
+            ensureNodesFileExists(nodesFile);
 
-        try (FileChannel channel = CacheIo.openReadWrite(nodesFile)) {
-            int existingCount = readNodeCount(channel);
-            int targetIndex = (nodeIndex < 0 || nodeIndex > existingCount) ? existingCount : nodeIndex;
+            try (FileChannel channel = CacheIo.openReadWrite(nodesFile)) {
+                int existingCount = readNodeCount(channel);
+                int targetIndex = (nodeIndex < 0 || nodeIndex > existingCount) ? existingCount : nodeIndex;
 
-            ByteBuffer record = ByteBuffer.allocate(NodeData.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-            writeNodeRecord(record, node);
-            record.flip();
-            channel.write(record, LodCacheFormat.NODES_HEADER_BYTES + (long) targetIndex * NodeData.BYTES);
+                ByteBuffer record = ByteBuffer.allocate(NodeData.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+                writeNodeRecord(record, node);
+                record.flip();
+                channel.write(record, LodCacheFormat.NODES_HEADER_BYTES + (long) targetIndex * NodeData.BYTES);
 
-            if (targetIndex == existingCount) {
-                writeNodeCount(channel, existingCount + 1);
+                if (targetIndex == existingCount) {
+                    writeNodeCount(channel, existingCount + 1);
+                }
+                channel.force(true);
+                return targetIndex;
             }
-            channel.force(true);
-            return targetIndex;
         }
     }
 
@@ -137,21 +163,23 @@ public final class LodCacheWriter {
     public void appendRegion(Path worldDir, String dimensionId, String modVersion,
                              RegionCoordinate regionCoordinate, long mtimeMs, String sourceHash,
                              List<NodeData> nodes, List<PackedQuad> quads) throws IOException {
-        Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
-        Path nodesFile = LodCacheFormat.nodesFile(dimDir);
-        Path quadsFile = LodCacheFormat.quadsFile(dimDir);
-        ensureNodesFileExists(nodesFile);
-        ensureQuadsFileExists(quadsFile);
+        synchronized (writeLock) {
+            Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
+            Path nodesFile = LodCacheFormat.nodesFile(dimDir);
+            Path quadsFile = LodCacheFormat.quadsFile(dimDir);
+            ensureNodesFileExists(nodesFile);
+            ensureQuadsFileExists(quadsFile);
 
-        long quadBaseOffset = bulkAppendQuads(quadsFile, quads);
-        int nodeBaseIndex = bulkAppendNodes(nodesFile, nodes, quadBaseOffset);
+            long quadBaseOffset = bulkAppendQuads(quadsFile, quads);
+            int nodeBaseIndex = bulkAppendNodes(nodesFile, nodes, quadBaseOffset);
 
-        RegionCacheEntry entry = new RegionCacheEntry(
-                regionCoordinate.x(), regionCoordinate.z(), mtimeMs, sourceHash, nodeBaseIndex, nodes.size());
-        mergeIndexEntry(dimDir, dimensionId, modVersion, entry);
+            RegionCacheEntry entry = new RegionCacheEntry(
+                    regionCoordinate.x(), regionCoordinate.z(), mtimeMs, sourceHash, nodeBaseIndex, nodes.size());
+            mergeIndexEntry(dimDir, dimensionId, modVersion, entry);
 
-        ExceptionalVision.LOGGER.info("Appended region {} to LOD cache for {}: {} nodes @ {}, {} quads @ {}",
-                regionCoordinate, dimensionId, nodes.size(), nodeBaseIndex, quads.size(), quadBaseOffset);
+            ExceptionalVision.LOGGER.info("Appended region {} to LOD cache for {}: {} nodes @ {}, {} quads @ {}",
+                    regionCoordinate, dimensionId, nodes.size(), nodeBaseIndex, quads.size(), quadBaseOffset);
+        }
     }
 
     /**
@@ -172,34 +200,36 @@ public final class LodCacheWriter {
                     + previousEntry.nodeCount() + ", now " + nodes.size() + "); use appendRegion instead");
         }
 
-        Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
-        Path nodesFile = LodCacheFormat.nodesFile(dimDir);
-        Path quadsFile = LodCacheFormat.quadsFile(dimDir);
-        ensureNodesFileExists(nodesFile);
-        ensureQuadsFileExists(quadsFile);
+        synchronized (writeLock) {
+            Path dimDir = LodCacheFormat.dimensionCacheDir(worldDir, dimensionId);
+            Path nodesFile = LodCacheFormat.nodesFile(dimDir);
+            Path quadsFile = LodCacheFormat.quadsFile(dimDir);
+            ensureNodesFileExists(nodesFile);
+            ensureQuadsFileExists(quadsFile);
 
-        long quadBaseOffset = bulkAppendQuads(quadsFile, quads);
+            long quadBaseOffset = bulkAppendQuads(quadsFile, quads);
 
-        try (FileChannel channel = CacheIo.openReadWrite(nodesFile)) {
-            for (int i = 0; i < nodes.size(); i++) {
-                NodeData shifted = nodes.get(i).withQuadRange(
-                        (int) (quadBaseOffset + nodes.get(i).quadOffset()), nodes.get(i).quadCount());
-                ByteBuffer record = ByteBuffer.allocate(NodeData.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-                writeNodeRecord(record, shifted);
-                record.flip();
-                long position = LodCacheFormat.NODES_HEADER_BYTES
-                        + (long) (previousEntry.nodeIndexStart() + i) * NodeData.BYTES;
-                channel.write(record, position);
+            try (FileChannel channel = CacheIo.openReadWrite(nodesFile)) {
+                for (int i = 0; i < nodes.size(); i++) {
+                    NodeData shifted = nodes.get(i).withQuadRange(
+                            (int) (quadBaseOffset + nodes.get(i).quadOffset()), nodes.get(i).quadCount());
+                    ByteBuffer record = ByteBuffer.allocate(NodeData.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+                    writeNodeRecord(record, shifted);
+                    record.flip();
+                    long position = LodCacheFormat.NODES_HEADER_BYTES
+                            + (long) (previousEntry.nodeIndexStart() + i) * NodeData.BYTES;
+                    channel.write(record, position);
+                }
+                channel.force(true);
             }
-            channel.force(true);
+
+            RegionCacheEntry updated = new RegionCacheEntry(regionCoordinate.x(), regionCoordinate.z(), mtimeMs, sourceHash,
+                    previousEntry.nodeIndexStart(), previousEntry.nodeCount());
+            mergeIndexEntry(dimDir, dimensionId, modVersion, updated);
+
+            ExceptionalVision.LOGGER.info("Patched region {} in LOD cache for {}: {} nodes @ {} (unchanged), {} fresh quads @ {}",
+                    regionCoordinate, dimensionId, nodes.size(), previousEntry.nodeIndexStart(), quads.size(), quadBaseOffset);
         }
-
-        RegionCacheEntry updated = new RegionCacheEntry(regionCoordinate.x(), regionCoordinate.z(), mtimeMs, sourceHash,
-                previousEntry.nodeIndexStart(), previousEntry.nodeCount());
-        mergeIndexEntry(dimDir, dimensionId, modVersion, updated);
-
-        ExceptionalVision.LOGGER.info("Patched region {} in LOD cache for {}: {} nodes @ {} (unchanged), {} fresh quads @ {}",
-                regionCoordinate, dimensionId, nodes.size(), previousEntry.nodeIndexStart(), quads.size(), quadBaseOffset);
     }
 
     private void mergeIndexEntry(Path dimDir, String dimensionId, String modVersion, RegionCacheEntry entry) throws IOException {
@@ -254,11 +284,13 @@ public final class LodCacheWriter {
      * (entry exists with the same node count).
      */
     public java.util.Optional<RegionCacheEntry> findRegionEntry(Path worldDir, String dimensionId, int regionX, int regionZ) throws IOException {
-        Path indexFile = LodCacheFormat.indexFile(LodCacheFormat.dimensionCacheDir(worldDir, dimensionId));
-        if (!Files.isRegularFile(indexFile)) {
-            return java.util.Optional.empty();
+        synchronized (writeLock) {
+            Path indexFile = LodCacheFormat.indexFile(LodCacheFormat.dimensionCacheDir(worldDir, dimensionId));
+            if (!Files.isRegularFile(indexFile)) {
+                return java.util.Optional.empty();
+            }
+            return CacheIndex.readFrom(indexFile).find(regionX, regionZ);
         }
-        return CacheIndex.readFrom(indexFile).find(regionX, regionZ);
     }
 
     /**

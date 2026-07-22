@@ -60,16 +60,36 @@ public final class LodRenderManager {
 
     private final LodGpuPipeline pipeline;
 
+    // DIAGNOSTIC (temporary - see PROGRESS.md "nothing renders" investigation): logs
+    // exactly once per condition so a single playtest log tells us whether this handler
+    // is even being invoked/reached at all, without spamming every frame.
+    private boolean loggedFirstInvocation = false;
+    private boolean loggedFirstSkipInactive = false;
+    private boolean loggedFirstRenderCall = false;
+    private boolean loggedFrameParamsOnce = false;
+
     public LodRenderManager(LodGpuPipeline pipeline) {
         this.pipeline = pipeline;
     }
 
     public void onRenderLevelStage(RenderLevelStageEvent event) {
+        if (!loggedFirstInvocation) {
+            loggedFirstInvocation = true;
+            ExceptionalVision.LOGGER.info("[EV-DIAG] onRenderLevelStage first invoked, stage={}", event.getStage());
+        }
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_LEVEL) {
             return;
         }
         if (!pipeline.isActive()) {
+            if (!loggedFirstSkipInactive) {
+                loggedFirstSkipInactive = true;
+                ExceptionalVision.LOGGER.info("[EV-DIAG] AFTER_LEVEL reached but pipeline.isActive()==false, skipping render");
+            }
             return;
+        }
+        if (!loggedFirstRenderCall) {
+            loggedFirstRenderCall = true;
+            ExceptionalVision.LOGGER.info("[EV-DIAG] AFTER_LEVEL reached, pipeline active, proceeding to renderLodFrame");
         }
 
         try {
@@ -92,6 +112,14 @@ public final class LodRenderManager {
             float minFarBlocks = Math.max(pipeline.lodRenderDistance(), nearCutoffBlocks) + FAR_PLANE_SAFETY_MARGIN_BLOCKS;
             Matrix4f lodProjection = FrustumExtractor.withExtendedFarPlane(
                     event.getProjectionMatrix(), minFarBlocks, ASSUMED_VANILLA_NEAR_PLANE);
+
+            if (!loggedFrameParamsOnce) {
+                loggedFrameParamsOnce = true;
+                ExceptionalVision.LOGGER.info(
+                        "[EV-DIAG] frame params: renderDistanceChunks={}, nearCutoffBlocks={}, lodRenderDistance={}, minFarBlocks={}, cameraWorldPos=({}, {}, {})",
+                        renderDistanceChunks, nearCutoffBlocks, pipeline.lodRenderDistance(), minFarBlocks,
+                        cameraWorldPos.x(), cameraWorldPos.y(), cameraWorldPos.z());
+            }
 
             // Minecraft's modelViewMatrix here is rotation-only (no camera translation) -
             // everything is already rendered camera-relative, which is exactly what

@@ -96,6 +96,32 @@ bool aabbInFrustum(vec3 mn, vec3 mx) {
 // starts right where the near cutoff ends, not at world distance 0 - see FIX note below).
 // This is a deliberately simple placeholder policy for the "basic" stage-4 pipeline - a
 // real screen-space-error metric is stage-5 territory.
+//
+// FIX (reported: "holes flicker in/out constantly, every bit of movement changes
+// something" - every player who tested a real flight confirmed this happens on
+// essentially every frame, not just once every few seconds): bands used to butt up
+// against each other exactly (level L's maxDist == level L+1's minDist), so a node
+// was "appropriate" for exactly one level at any given distance with zero margin.
+// Floating-point distance changes constantly as the camera moves, so on *every* frame
+// where `dist` was near a band boundary, a node could transiently fail its own level's
+// test before crossing cleanly into the neighboring level's - and unlike a single
+// mesh with continuous LOD morphing, each level here is a *different, independently
+// (rebuilt) node* at a coarser resolution, so there's no guarantee the neighboring
+// level's node for that same patch of terrain is already resident/valid at that exact
+// moment either. Net effect: a visible gap for a frame or few, repeating constantly
+// during any sustained movement (flying covers many band boundaries per second).
+//
+// HYSTERESIS_FRACTION widens every band by this fraction on both ends, so neighboring
+// levels overlap in a band of distances rather than meeting at a single knife-edge.
+// Within an overlap, *both* levels pass this check and both get drawn; the depth
+// buffer alone resolves which one is actually visible per-pixel (whichever surface is
+// physically closer to the camera wins - no explicit priority needed, since both
+// levels approximate the same terrain in roughly the same place). This trades a
+// small, momentary double-draw at band edges (cheap - it's only the handful of nodes
+// straddling a boundary, not the whole scene) for guaranteeing there's always at
+// least one valid level covering every distance, eliminating the flicker entirely.
+const float HYSTERESIS_FRACTION = 0.15;
+
 bool lodLevelAppropriate(NodeData node) {
     vec3 center = 0.5 * (node.aabbMin.xyz + node.aabbMax.xyz);
     float dist = distance(cameraWorldPos, center);
@@ -113,6 +139,7 @@ bool lodLevelAppropriate(NodeData node) {
     // regardless of what the player's render-distance setting happens to be.
     float effectiveDist = max(dist - nearCutoffDistance, 0.0);
     float minDist = node.lodLevel == 0u ? 0.0 : baseLodDistance * float(1u << (node.lodLevel - 1u));
+    float minDistWidened = node.lodLevel == 0u ? 0.0 : minDist * (1.0 - HYSTERESIS_FRACTION);
     if (node.lodLevel >= maxLodLevel) {
         // FIX (stage-4 gap): top level used to cover everything beyond its band with no
         // upper bound at all, i.e. it drew regardless of how far away it was - changing
@@ -120,10 +147,11 @@ bool lodLevelAppropriate(NodeData node) {
         // the same hard cutoff every other level respects. This comparison intentionally
         // uses the *unshifted* dist, not effectiveDist - lodRenderDistance is an absolute
         // "how far from the camera" limit, not one more band relative to the near cutoff.
-        return effectiveDist >= minDist && dist < lodRenderDistance;
+        return effectiveDist >= minDistWidened && dist < lodRenderDistance * (1.0 + HYSTERESIS_FRACTION);
     }
     float maxDist = baseLodDistance * float(1u << node.lodLevel);
-    return effectiveDist >= minDist && effectiveDist < maxDist;
+    float maxDistWidened = maxDist * (1.0 + HYSTERESIS_FRACTION);
+    return effectiveDist >= minDistWidened && effectiveDist < maxDistWidened;
 }
 
 void main() {

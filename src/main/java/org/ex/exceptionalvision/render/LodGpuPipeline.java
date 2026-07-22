@@ -166,6 +166,12 @@ public final class LodGpuPipeline implements AutoCloseable {
      */
     public void renderLodFrame(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos) {
         if (!initialized || buffers.nodeCount() == 0) {
+            if (!loggedFirstNoOpFrame) {
+                loggedFirstNoOpFrame = true;
+                ExceptionalVision.LOGGER.info(
+                        "[EV-DIAG] renderLodFrame no-op: initialized={}, buffers.nodeCount()={}",
+                        initialized, buffers.nodeCount());
+            }
             return;
         }
 
@@ -175,13 +181,36 @@ public final class LodGpuPipeline implements AutoCloseable {
             glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
 
             int drawCount = buffers.readDrawCount(); // CPU/GPU sync point - see class javadoc
+            if (!loggedFirstCullResult) {
+                loggedFirstCullResult = true;
+                ExceptionalVision.LOGGER.info(
+                        "[EV-DIAG] first cull result: nodeCount={}, drawCount={}, baseLodDistance={}, lodRenderDistance={}, nearCutoffDistance={}, maxLodLevel={}",
+                        buffers.nodeCount(), drawCount, baseLodDistance, lodRenderDistance, nearCutoffDistance, maxLodLevel);
+            }
             if (drawCount > 0) {
                 runDrawPass(viewProjectionMatrix, cameraWorldPos, drawCount);
+                if (!loggedFirstDrawCall) {
+                    loggedFirstDrawCall = true;
+                    ExceptionalVision.LOGGER.info("[EV-DIAG] first draw pass issued: drawCount={}", drawCount);
+                }
+            } else if (!loggedFirstZeroDraw) {
+                loggedFirstZeroDraw = true;
+                ExceptionalVision.LOGGER.warn(
+                        "[EV-DIAG] cull pass produced drawCount=0 - nothing to draw this frame (nodeCount={})",
+                        buffers.nodeCount());
             }
         } finally {
             stateBackup.restore();
         }
     }
+
+    // DIAGNOSTIC (temporary - see PROGRESS.md "nothing renders" investigation): one-shot
+    // flags so a single playtest log tells us where in the per-frame path things stand,
+    // without spamming every frame.
+    private boolean loggedFirstNoOpFrame = false;
+    private boolean loggedFirstCullResult = false;
+    private boolean loggedFirstDrawCall = false;
+    private boolean loggedFirstZeroDraw = false;
 
     private void runCullPass(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos) {
         buffers.resetDrawCounter();

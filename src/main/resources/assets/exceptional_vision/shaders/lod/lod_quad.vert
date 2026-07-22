@@ -104,5 +104,12 @@ void main() {
 
     vMaterialIndex = materialIndex;
     vLight = float(light) / 15.0;
-    vDistanceToCamera = length(cameraRelative);
+    // FIX: quad_cull.comp's node-level cutoff now measures horizontal (XZ) distance to
+    // decide whether a node draws at all (see that shader's lodLevelAppropriate) - this
+    // per-vertex distance feeds lod_quad.frag's dither fade over the last stretch before
+    // lodRenderDistance, and must use the same horizontal-only metric. Using the full 3D
+    // length(cameraRelative) here would fade quads based on slant distance (including
+    // height), disagreeing with the cutoff that already decided this node is visible, and
+    // reintroducing the same altitude-dependent shrinkage in the fade band specifically.
+    vDistanceToCamera = length(cameraRelative.xz);
 }

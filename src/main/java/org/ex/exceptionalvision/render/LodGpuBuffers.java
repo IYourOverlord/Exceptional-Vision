@@ -1,5 +1,6 @@
 package org.ex.exceptionalvision.render;
 
+import org.ex.exceptionalvision.ExceptionalVision;
 import org.ex.exceptionalvision.cache.LodCacheData;
 import org.ex.exceptionalvision.world.lod.PackedQuad;
 
@@ -116,6 +117,9 @@ public final class LodGpuBuffers implements AutoCloseable {
      */
     public void uploadIncremental(LodCacheData cacheData, List<Integer> materialColors) {
         if (nodeCapacityBytes == 0 || cacheData.quadCount() < this.quadCount) {
+            ExceptionalVision.LOGGER.info(
+                    "[EV-DIAG] uploadIncremental falling back to full upload: nodeCapacityBytes={}, cacheData.quadCount()={}, this.quadCount={}",
+                    nodeCapacityBytes, cacheData.quadCount(), this.quadCount);
             upload(cacheData, materialColors);
             return;
         }
@@ -125,7 +129,18 @@ public final class LodGpuBuffers implements AutoCloseable {
         ensureNodeCapacity(nodeBytes);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, nodeBuffer);
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0L, nodes);
+        int nodeCountBefore = this.nodeCount;
         this.nodeCount = cacheData.nodeCount();
+
+        // DIAGNOSTIC (temporary - see PROGRESS.md "periodic holes on autosave" investigation):
+        // nodes.bin's freshly-uploaded records may already carry quadOffsets that point past
+        // this.quadCount if cacheData's quads haven't been appended below yet - logged so we
+        // can confirm whether a cull/draw pass can observe this in-between state.
+        if (cacheData.quadCount() == this.quadCount && cacheData.nodeCount() != nodeCountBefore) {
+            ExceptionalVision.LOGGER.info(
+                    "[EV-DIAG] uploadIncremental: node count changed {} -> {} with quadCount unchanged at {} (region patch with no new quads this call)",
+                    nodeCountBefore, cacheData.nodeCount(), this.quadCount);
+        }
 
         long newQuadCount = cacheData.quadCount();
         if (newQuadCount > this.quadCount) {
