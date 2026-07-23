@@ -27,7 +27,9 @@ public final class ExceptionalVisionConfig {
                 .defineInRange("lodRenderDistance", 2048, 256, 16384);
 
         GPU_DRIVEN_CULLING = builder
-                .comment("Use GPU compute-shader culling (requires OpenGL 4.3+).",
+                .comment("Use GPU compute-shader culling (requires OpenGL 4.6 core - see",
+                        "GpuCapabilities for why compute shaders alone (4.3+) aren't enough,",
+                        "the vertex shader also needs the core gl_DrawID builtin).",
                         "If disabled or unsupported by the GPU, the mod falls back accordingly.")
                 .define("gpuDrivenCulling", true);
 

@@ -67,6 +67,16 @@ public final class LodRenderManager {
     private boolean loggedFirstSkipInactive = false;
     private boolean loggedFirstRenderCall = false;
     private boolean loggedFrameParamsOnce = false;
+    // DIAGNOSTIC (temporary - see PROGRESS.md "diagonal frustum wedge" investigation):
+    // logs event.getModelViewMatrix()'s translation components (m30/m31/m32) once, to
+    // confirm or refute the assumption (stated in this class's javadoc, never verified
+    // against a real build until now) that this matrix is rotation-only. If it's truly
+    // rotation-only these should print as ~0/0/0 every time regardless of camera
+    // position; if they instead track the camera's world position, that assumption is
+    // wrong and is very likely the direct cause of the diagonal wedge artifact - see the
+    // comment at the call site below for why a mistaken translation here would produce
+    // exactly that shape of bug.
+    private boolean loggedModelViewTranslationOnce = false;
 
     public LodRenderManager(LodGpuPipeline pipeline) {
         this.pipeline = pipeline;
@@ -127,7 +137,29 @@ public final class LodRenderManager {
             // it with the projection matrix the same way vanilla does keeps our geometry
             // aligned with everything else in the frame - using lodProjection instead of
             // event.getProjectionMatrix() directly is exactly the fix described above.
-            Matrix4f viewProjection = lodProjection.mul(event.getModelViewMatrix());
+            //
+            // DIAGNOSTIC: if that "rotation-only" assumption is actually wrong (i.e. this
+            // matrix DOES carry the camera's translation), frustumPlanes extracted from
+            // viewProjection below would already be centered on the camera in world
+            // space - but quad_cull.comp's aabbInFrustum call additionally subtracts
+            // cameraWorldPos from every node's AABB before testing it (see that shader),
+            // on the assumption the planes are translation-free. Double-applying the
+            // camera offset that way shifts every plane by (roughly) cameraWorldPos a
+            // second time, which would clip half the frustum along whichever axis
+            // dominates cameraWorldPos at the time - a diagonal wedge whose position and
+            // orientation track the camera, worsening/rotating as the camera moves or
+            // looks around. That matches the "diagonal wedge" artifact reported after a
+            // real playtest; logging the actual translation components here once
+            // confirms or refutes this without guessing further.
+            Matrix4f modelView = event.getModelViewMatrix();
+            if (!loggedModelViewTranslationOnce) {
+                loggedModelViewTranslationOnce = true;
+                ExceptionalVision.LOGGER.info(
+                        "[EV-DIAG] modelViewMatrix translation check: m30={}, m31={}, m32={} (should be ~0,0,0 if truly rotation-only; cameraWorldPos=({}, {}, {}))",
+                        modelView.m30(), modelView.m31(), modelView.m32(),
+                        cameraWorldPos.x(), cameraWorldPos.y(), cameraWorldPos.z());
+            }
+            Matrix4f viewProjection = lodProjection.mul(modelView);
 
             pipeline.renderLodFrame(viewProjection, cameraWorldPos);
         } catch (RuntimeException e) {

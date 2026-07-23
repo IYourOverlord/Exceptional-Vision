@@ -22,9 +22,18 @@ import java.util.List;
  * </ul>
  * <b>Scope note:</b> {@link #meshBoundaryAlongX}/{@link #meshBoundaryAlongZ} only close
  * seams between two nodes of the <em>same</em> LOD level — a node bordering a
- * differently-leveled neighbor (i.e. a LOD distance-band transition) still has an open
- * seam there, and so does a node at the edge of its region (no cross-region grid access
- * here). Both remain open problems; see "Баг 9" in {@code PROGRESS.md}.
+ * differently-leveled neighbor (i.e. a LOD distance-band transition) still has no real
+ * geometric stitching there, and neither does a node at the edge of its region (no
+ * cross-region grid access here). See "Баг 9" in {@code PROGRESS.md}.
+ * <p>
+ * {@link #meshSkirts} covers both of those remaining cases, but not by real stitching —
+ * every node grows a downward-hanging "skirt" quad along its own outer edge,
+ * independent of what (if anything) is known about the neighbor on the other side. This
+ * hides a height mismatch at any unstitched seam (LOD-level transition, region edge, or
+ * simply a not-yet-generated neighbor) as a shadowed drop rather than a see-through gap,
+ * without requiring cross-level or cross-region grid access. It runs unconditionally on
+ * every node, including edges {@code stitchLevel} already closes with real geometry —
+ * see {@link #meshSkirts}'s own javadoc for why that's harmless.
  * <p>
  * <b>packed1 width/height convention</b> (not fully pinned down by
  * {@code 03_data_formats.md}, so documented here for whatever consumes it next — the
@@ -43,6 +52,9 @@ public final class GreedyMesher {
     /** Encodes world Y (-64..320) as an unsigned value so it fits PackedQuad's 12-bit y field; see 03_data_formats.md. */
     static final int Y_OFFSET = 64;
 
+    /** Minimum generatable world Y since 1.18 (see {@code 05_world_data_ingestion.md}); used to clamp skirt geometry. */
+    private static final int WORLD_MIN_Y = -64;
+
     private static final int AXIS_POS_X = 0;
     private static final int AXIS_NEG_X = 1;
     private static final int AXIS_POS_Y = 2;
@@ -54,6 +66,7 @@ public final class GreedyMesher {
         meshTopFaces(grid, quads);
         meshWallsAlongX(grid, quads);
         meshWallsAlongZ(grid, quads);
+        meshSkirts(grid, quads);
         return quads;
     }
 
@@ -219,6 +232,121 @@ public final class GreedyMesher {
             x += runLength;
         }
         return out;
+    }
+
+    // ---- skirts (mask seams at LOD-level transitions / region edges) -----------------
+
+    /**
+     * A skirt's vertical extent, in raw <em>blocks</em> (not grid cells) — deliberately
+     * flat across every LOD level so a coarse level-5 node's skirt isn't 32x "deeper"
+     * in world space than a level-0 node's for the same nominal drop. Large enough to
+     * plausibly cover the worst-case height mismatch against an unknown neighbor at an
+     * adjacent, differently-leveled node or across a region boundary, without being so
+     * tall it becomes its own visible artifact (a vertical wall jutting out of a
+     * hillside) when the seam it's meant to hide isn't actually there.
+     * <p>
+     * Not derived from any measured worst-case drop — a fixed, generous constant is the
+     * standard, simple version of this technique (see e.g. how terrain-LOD "skirts" are
+     * commonly described in the voxel/heightfield-rendering literature this project
+     * draws general technique names from, per {@code 01_legal_constraints.md} — this is
+     * an independent implementation, not derived from any specific engine's source).
+     */
+    private static final int SKIRT_DEPTH_BLOCKS = 8;
+
+    /**
+     * Adds a downward-hanging "skirt" quad along every one of a node's four outer grid
+     * edges (local x=0, x=SIZE-1, z=0, z=SIZE-1), one per present boundary cell (merged
+     * into runs exactly like {@link #meshWallsAlongX}/{@link #meshWallsAlongZ}).
+     * <p>
+     * Unlike {@link #meshBoundaryAlongX}/{@link #meshBoundaryAlongZ} (which need the
+     * neighbor's actual grid and only cover same-level, same-region neighbors), a skirt
+     * needs no information about what's on the other side of the edge at all: it simply
+     * extends this node's own boundary geometry straight down by {@link #SKIRT_DEPTH_BLOCKS}
+     * blocks. Whatever is drawn on the far side of the seam — a same-level neighbor
+     * already stitched by {@code stitchLevel}, a differently-leveled neighbor (a LOD
+     * distance-band transition, unhandled by any other stitching path), or a
+     * not-yet-generated region edge — the skirt's near-vertical drop makes any height
+     * mismatch at the seam read as shadow/occlusion rather than a see-through gap,
+     * without this node needing to know which of those cases applies.
+     * <p>
+     * This runs on <em>every</em> node's own outer edge, including edges that
+     * {@code stitchLevel} already closes with real geometry — the skirt there simply
+     * ends up fully behind/co-planar with that real wall quad and is not visible
+     * (harmless, not wasted: skirts and {@code stitchLevel} target different classes of
+     * seam and neither knows which case the other is handling for a given edge).
+     */
+    private void meshSkirts(ColumnGrid grid, List<PackedQuad> out) {
+        // West edge (x=0): faces -X outward.
+        meshSkirtRun(grid, out, true, 0, AXIS_NEG_X);
+        // East edge (x=SIZE-1): faces +X outward.
+        meshSkirtRun(grid, out, true, ColumnGrid.SIZE - 1, AXIS_POS_X);
+        // South edge (z=0): faces -Z outward.
+        meshSkirtRun(grid, out, false, 0, AXIS_NEG_Z);
+        // North edge (z=SIZE-1): faces +Z outward.
+        meshSkirtRun(grid, out, false, ColumnGrid.SIZE - 1, AXIS_POS_Z);
+    }
+
+    /**
+     * Merges runs of present, same-(height, material) cells along one fixed-coordinate
+     * edge of the grid into skirt quads, the same greedy run-merge shape as
+     * {@link #meshWallsAlongX}/{@link #meshWallsAlongZ}.
+     *
+     * @param alongX      true for the west/east edges (fixed local X, run direction Z);
+     *                    false for the south/north edges (fixed local Z, run direction X)
+     * @param fixedCoord  the local x (if {@code alongX}) or z (otherwise) coordinate of
+     *                    the edge itself — always 0 or {@code ColumnGrid.SIZE - 1}
+     * @param axis        outward-facing wall axis code for this edge, reused from the
+     *                    interior-wall convention ({@code wallBetween})
+     */
+    private void meshSkirtRun(ColumnGrid grid, List<PackedQuad> out, boolean alongX, int fixedCoord, int axis) {
+        int runStart = 0;
+        while (runStart < ColumnGrid.SIZE) {
+            if (!edgePresent(grid, alongX, fixedCoord, runStart)) {
+                runStart++;
+                continue;
+            }
+            int height = edgeHeight(grid, alongX, fixedCoord, runStart);
+            int material = edgeMaterial(grid, alongX, fixedCoord, runStart);
+            int light = edgeLight(grid, alongX, fixedCoord, runStart);
+
+            int runLength = 1;
+            while (runStart + runLength < ColumnGrid.SIZE
+                    && edgePresent(grid, alongX, fixedCoord, runStart + runLength)
+                    && edgeHeight(grid, alongX, fixedCoord, runStart + runLength) == height
+                    && edgeMaterial(grid, alongX, fixedCoord, runStart + runLength) == material) {
+                runLength++;
+            }
+
+            int localX = alongX ? fixedCoord : runStart;
+            int localZ = alongX ? runStart : fixedCoord;
+            // Skirt hangs down from just below the surface (height - 1) rather than from
+            // the surface itself, so its top edge tucks under the top-face quad instead of
+            // z-fighting with it at the shared boundary. Clamped to WORLD_MIN_Y: a column
+            // already sitting at the world floor (-64) has nowhere lower to hang a skirt
+            // from, and height - 1 there would encode as -65, which underflows PackedQuad's
+            // unsigned 12-bit y field (wraps to 4095, a wall floating near the sky instead
+            // of at bedrock) rather than clamping the way a signed field would.
+            int skirtTop = Math.max(height - 1, WORLD_MIN_Y);
+            out.add(PackedQuad.of(localX, skirtTop + Y_OFFSET, localZ, axis, runLength, SKIRT_DEPTH_BLOCKS, material, light));
+
+            runStart += runLength;
+        }
+    }
+
+    private boolean edgePresent(ColumnGrid grid, boolean alongX, int fixedCoord, int runCoord) {
+        return grid.present(alongX ? fixedCoord : runCoord, alongX ? runCoord : fixedCoord);
+    }
+
+    private int edgeHeight(ColumnGrid grid, boolean alongX, int fixedCoord, int runCoord) {
+        return grid.height(alongX ? fixedCoord : runCoord, alongX ? runCoord : fixedCoord);
+    }
+
+    private int edgeMaterial(ColumnGrid grid, boolean alongX, int fixedCoord, int runCoord) {
+        return grid.material(alongX ? fixedCoord : runCoord, alongX ? runCoord : fixedCoord);
+    }
+
+    private int edgeLight(ColumnGrid grid, boolean alongX, int fixedCoord, int runCoord) {
+        return grid.light(alongX ? fixedCoord : runCoord, alongX ? runCoord : fixedCoord);
     }
 
     /**

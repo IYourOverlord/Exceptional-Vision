@@ -79,10 +79,15 @@ public final class LodBuilder {
      * nodes in this level's grid by appending boundary wall quads to the east/north
      * node of each pair (see {@link GreedyMesher#meshBoundaryAlongX}/
      * {@code meshBoundaryAlongZ} for why it's always the east/north side that receives
-     * the quads). Only intra-region, same-level seams are closed this way — the region's
-     * own outer edge (no neighboring region's grid available here) and LOD-level
-     * transitions (a node's neighbor at a coarser/finer level lives in a different
-     * level's array, not this one) are out of scope; see "Баг 9" in {@code PROGRESS.md}.
+     * the quads). Only intra-region, same-level seams are closed this way with real
+     * geometry — the region's own outer edge (no neighboring region's grid available
+     * here) and LOD-level transitions (a node's neighbor at a coarser/finer level lives
+     * in a different level's array, not this one) are out of scope; see "Баг 9" in
+     * {@code PROGRESS.md}. Every node built by {@link #buildNode} also gets a
+     * {@code GreedyMesher.meshSkirts} pass along its own outer edge regardless of level,
+     * which masks (rather than geometrically stitches) exactly those two remaining
+     * cases — see that method's javadoc for how and why that's sufficient without
+     * cross-level or cross-region grid access.
      */
     private void stitchLevel(LodNode[][] level, int width) {
         for (int z = 0; z < width; z++) {
