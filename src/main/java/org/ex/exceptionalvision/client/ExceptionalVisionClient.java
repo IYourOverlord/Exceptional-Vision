@@ -300,12 +300,15 @@ public final class ExceptionalVisionClient {
      * javadoc), never the render thread - every GL call must be deferred via
      * {@link Minecraft#execute}.
      * <p>
-     * Stage-4 note: this reloads and re-uploads the <em>entire</em> cache for every
-     * single region that finishes, because {@link LodGpuPipeline#uploadCache} has no
-     * incremental path yet (see its class javadoc). Acceptable for now - a background
-     * Chunky import will just re-upload a growing SSBO a lot - but this exact cost is
-     * what stage 5's persistent mapped buffers / incremental upload are meant to
-     * replace, not something to half-fix here (e.g. via debouncing) and re-break later.
+     * {@link LodGpuPipeline#uploadCache} applies each fresh snapshot incrementally
+     * (see {@link org.ex.exceptionalvision.render.LodGpuBuffers#uploadIncremental}) -
+     * only the new tail of {@code quads.bin} is transferred, via a persistent-mapped
+     * {@code memcpy} where {@link org.ex.exceptionalvision.render.GpuCapabilities
+     * #persistentMappingSupported()} allows it (stage 5) or a plain
+     * {@code glBufferSubData} otherwise - rather than reuploading the entire cache for
+     * every region that finishes. {@code nodes.bin} is still resubmitted in full each
+     * call (small enough that diffing it wouldn't be worth the complexity - see that
+     * method's javadoc).
      */
     private static void onRegionCached(LodBuildResult result) {
         LodPipeline pipeline = activePipeline;

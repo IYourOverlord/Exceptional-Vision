@@ -14,14 +14,21 @@ import static org.lwjgl.opengl.GL46C.*;
 /**
  * Orchestrates one frame of LOD terrain rendering: frustum/LOD-level culling on the
  * GPU, then an indirect multi-draw of whatever survived. See
- * {@code 04_gpu_pipeline.md}.
+ * {@code 04_gpu_pipeline.md} (stage 4) and {@code 08_roadmap_milestones.md} (stage 5)
+ * for the two paths this now supports.
  * <p>
- * <b>Stage-4 scope:</b> this uses the <em>explicit CPU-readback</em> path — after the
- * compute dispatch, the visible-node count is read back to the CPU and passed as an
- * explicit {@code drawcount} to {@code glMultiDrawArraysIndirect}. That readback is a
- * CPU/GPU sync point (a potential stall), which is exactly why the roadmap treats the
- * fully GPU-resident {@code glMultiDrawArraysIndirectCount} path (no readback, no
- * stall) as a separate, later stage (stage 5) rather than part of this "basic" one.
+ * <b>Stage 5:</b> when {@link GpuCapabilities#indirectCountSupported()} is {@code true}
+ * (the common case - see that method's javadoc for why), {@link #renderLodFrame} takes
+ * the fully GPU-resident path: {@code glMultiDrawArraysIndirectCount} reads the compute
+ * shader's atomic draw counter directly out of a GPU buffer when issuing the multi-draw
+ * (see {@link #runDrawPassIndirectCount}), so there is no CPU readback and no CPU/GPU
+ * sync point in the per-frame path at all.
+ * <p>
+ * <b>Stage-4 fallback:</b> {@link #runDrawPassWithReadback} preserves the original
+ * behavior - the visible-node count is read back to the CPU and passed as an explicit
+ * {@code drawcount} to {@code glMultiDrawArraysIndirect}, incurring a CPU/GPU sync
+ * point every frame - kept for the (in practice rare) context where {@link
+ * GpuCapabilities#indirectCountSupported()} is {@code false}.
  */
 public final class LodGpuPipeline implements AutoCloseable {
 
@@ -72,11 +79,14 @@ public final class LodGpuPipeline implements AutoCloseable {
 
         cullProgram = ShaderProgram.compute(CULL_SHADER);
         drawProgram = ShaderProgram.vertexFragment(VERT_SHADER, FRAG_SHADER);
-        buffers.create();
+        buffers.create(capabilities);
         dummyVertexArray = glGenVertexArrays(); // no vertex attributes are used - geometry is generated from SSBOs by gl_VertexID/gl_DrawID
 
         initialized = true;
-        ExceptionalVision.LOGGER.info("LOD GPU pipeline initialized (OpenGL {})", capabilities.glVersionString());
+        ExceptionalVision.LOGGER.info(
+                "LOD GPU pipeline initialized (OpenGL {}, indirectCount={}, persistentMapping={})",
+                capabilities.glVersionString(), capabilities.indirectCountSupported(),
+                capabilities.persistentMappingSupported());
     }
 
     public boolean isActive() {
@@ -180,27 +190,70 @@ public final class LodGpuPipeline implements AutoCloseable {
             runCullPass(viewProjectionMatrix, cameraWorldPos);
             glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
 
-            int drawCount = buffers.readDrawCount(); // CPU/GPU sync point - see class javadoc
-            if (!loggedFirstCullResult) {
-                loggedFirstCullResult = true;
-                ExceptionalVision.LOGGER.info(
-                        "[EV-DIAG] first cull result: nodeCount={}, drawCount={}, baseLodDistance={}, lodRenderDistance={}, nearCutoffDistance={}, maxLodLevel={}",
-                        buffers.nodeCount(), drawCount, baseLodDistance, lodRenderDistance, nearCutoffDistance, maxLodLevel);
-            }
-            if (drawCount > 0) {
-                runDrawPass(viewProjectionMatrix, cameraWorldPos, drawCount);
-                if (!loggedFirstDrawCall) {
-                    loggedFirstDrawCall = true;
-                    ExceptionalVision.LOGGER.info("[EV-DIAG] first draw pass issued: drawCount={}", drawCount);
-                }
-            } else if (!loggedFirstZeroDraw) {
-                loggedFirstZeroDraw = true;
-                ExceptionalVision.LOGGER.warn(
-                        "[EV-DIAG] cull pass produced drawCount=0 - nothing to draw this frame (nodeCount={})",
-                        buffers.nodeCount());
+            if (capabilities.indirectCountSupported()) {
+                runDrawPassIndirectCount(viewProjectionMatrix, cameraWorldPos);
+            } else {
+                runDrawPassWithReadback(viewProjectionMatrix, cameraWorldPos);
             }
         } finally {
             stateBackup.restore();
+        }
+    }
+
+    /**
+     * Stage 5's "full path" (see {@code GpuCapabilities#indirectCountSupported()}): the
+     * GPU reads its own draw counter when issuing the multi-draw via {@code
+     * glMultiDrawArraysIndirectCount} - no CPU readback, no CPU/GPU sync point. The
+     * memory barrier issued by the caller right after the cull dispatch (see {@code
+     * GL_COMMAND_BARRIER_BIT} in {@link #renderLodFrame}) already covers both the
+     * indirect-command buffer this reads and the counter buffer bound as {@code
+     * GL_PARAMETER_BUFFER} below - {@code GL_COMMAND_BARRIER_BIT} specifically applies
+     * to data sourced from buffer objects via commands like this one.
+     * <p>
+     * Always issues the draw (up to {@link LodGpuBuffers#maxDrawCommands()}), even when
+     * the actual count could be zero - unlike the readback path, there is no CPU-visible
+     * count here to skip the call on, and issuing a multi-draw with a GPU-side count of
+     * zero is a defined, cheap no-op rather than an error.
+     */
+    private void runDrawPassIndirectCount(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos) {
+        if (!loggedFirstDrawCall) {
+            loggedFirstDrawCall = true;
+            ExceptionalVision.LOGGER.info(
+                    "[EV-DIAG] first indirect-count draw pass issued (no CPU readback): nodeCount={}, maxDrawCommands={}",
+                    buffers.nodeCount(), buffers.maxDrawCommands());
+        }
+        prepareDrawState(viewProjectionMatrix, cameraWorldPos);
+        buffers.multiDrawIndirectCount(GL_TRIANGLES, buffers.maxDrawCommands());
+    }
+
+    /**
+     * Stage-4 fallback path, kept for {@link GpuCapabilities#indirectCountSupported()}
+     * {@code == false} contexts (see that method's javadoc - in practice this means a
+     * denylisted driver rather than a real GL-version gap, since {@code
+     * glMultiDrawArraysIndirectCount} is core at the same GL 4.6 floor this whole
+     * pipeline already requires). Reads the visible-node count back to the CPU (a
+     * CPU/GPU sync point) and passes it explicitly to {@code glMultiDrawArraysIndirect}.
+     */
+    private void runDrawPassWithReadback(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos) {
+        int drawCount = buffers.readDrawCount(); // CPU/GPU sync point - see class javadoc
+        if (!loggedFirstCullResult) {
+            loggedFirstCullResult = true;
+            ExceptionalVision.LOGGER.info(
+                    "[EV-DIAG] first cull result (readback fallback path): nodeCount={}, drawCount={}, baseLodDistance={}, lodRenderDistance={}, nearCutoffDistance={}, maxLodLevel={}",
+                    buffers.nodeCount(), drawCount, baseLodDistance, lodRenderDistance, nearCutoffDistance, maxLodLevel);
+        }
+        if (drawCount > 0) {
+            prepareDrawState(viewProjectionMatrix, cameraWorldPos);
+            glMultiDrawArraysIndirect(GL_TRIANGLES, 0L, drawCount, 0);
+            if (!loggedFirstDrawCall) {
+                loggedFirstDrawCall = true;
+                ExceptionalVision.LOGGER.info("[EV-DIAG] first draw pass issued (readback fallback): drawCount={}", drawCount);
+            }
+        } else if (!loggedFirstZeroDraw) {
+            loggedFirstZeroDraw = true;
+            ExceptionalVision.LOGGER.warn(
+                    "[EV-DIAG] cull pass produced drawCount=0 - nothing to draw this frame (nodeCount={})",
+                    buffers.nodeCount());
         }
     }
 
@@ -242,7 +295,13 @@ public final class LodGpuPipeline implements AutoCloseable {
         glDispatchCompute(workGroups, 1, 1);
     }
 
-    private void runDrawPass(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos, int drawCount) {
+    /**
+     * Sets up everything the draw call needs (GL state, program, buffer bindings,
+     * uniforms) but does not itself issue the draw - callers ({@link
+     * #runDrawPassIndirectCount}, {@link #runDrawPassWithReadback}) each issue their own
+     * multi-draw variant right after calling this.
+     */
+    private void prepareDrawState(Matrix4f viewProjectionMatrix, Vector3f cameraWorldPos) {
         // BUGFIX: GlStateBackup only saves/restores whatever state was already set - it
         // never established the state OUR draw actually needs. At Stage.AFTER_LEVEL, GL
         // state is whatever vanilla's translucent pass left behind (typically
@@ -274,9 +333,8 @@ public final class LodGpuPipeline implements AutoCloseable {
         drawProgram.setUniform3f("cameraWorldPos", cameraWorldPos.x(), cameraWorldPos.y(), cameraWorldPos.z());
         drawProgram.setUniform1f("lodRenderDistance", lodRenderDistance);
 
-        // GL_DRAW_INDIRECT_BUFFER is bound (see LodGpuBuffers#bindForDraw) - the "indirect"
-        // argument here is a BYTE OFFSET into that buffer, not a client-memory pointer.
-        glMultiDrawArraysIndirect(GL_TRIANGLES, 0L, drawCount, 0);
+        // GL_DRAW_INDIRECT_BUFFER is bound (see LodGpuBuffers#bindForDraw) - both multi-draw
+        // variants read commands from it via a BYTE OFFSET, not a client-memory pointer.
     }
 
     @Override

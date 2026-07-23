@@ -22,6 +22,19 @@ import static org.lwjgl.opengl.GL46C.*;
  * byte-for-byte in the GPU struct layout (little-endian, tightly packed, header
  * already stripped), so uploading them is a single {@code glBufferData} call each - no
  * CPU-side re-packing. That direct-upload property was a deliberate stage-3 design goal.
+ * <p>
+ * <b>Stage 5:</b> the quad buffer (by far the largest and most frequently appended-to
+ * one - see {@link #uploadIncremental}'s javadoc) now uses a <em>persistent mapped
+ * ring</em> via {@code glBufferStorage(GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT |
+ * GL_MAP_COHERENT_BIT)} when {@link GpuCapabilities#persistentMappingSupported()} is
+ * true (roadmap: "Persistent mapped buffers for streaming new data without stalls").
+ * The pointer returned by {@code glMapBufferRange} stays valid for the buffer's entire
+ * lifetime, so appending new quads is a plain {@code memcpy} into already-mapped client
+ * memory instead of a {@code glBufferSubData} call that must synchronize with whatever
+ * draw call last read that buffer range. Growth still requires a new allocation (you
+ * cannot resize a persistent-mapped buffer in place) - see {@link #ensureQuadCapacity}.
+ * Falls back transparently to the stage-4 {@code glBufferData}/{@code glBufferSubData}
+ * path when persistent mapping isn't available.
  */
 public final class LodGpuBuffers implements AutoCloseable {
 
@@ -52,7 +65,41 @@ public final class LodGpuBuffers implements AutoCloseable {
     private long nodeCapacityBytes;
     private long quadCapacityBytes;
 
+    // Stage 5: whether the currently-allocated quadBuffer was created with
+    // glBufferStorage(GL_MAP_PERSISTENT_BIT) (true) or plain glBufferData (false, the
+    // stage-4 fallback path). Decided once at create()-time from GpuCapabilities and
+    // re-decided every time ensureQuadCapacity() has to allocate a new buffer object,
+    // so a mid-session capability change (there isn't one in practice - detect() runs
+    // once at init()) can't leave this out of sync with the buffer that actually exists.
+    private boolean quadBufferPersistent;
+    // Valid only when quadBufferPersistent is true - the client-memory pointer returned
+    // by glMapBufferRange, stable for the mapped buffer's entire lifetime. GL_MAP_COHERENT_BIT
+    // means writes through this pointer are visible to the GPU without an explicit
+    // glFlushMappedBufferRange call, at the cost of the driver handling that coherency
+    // itself rather than us controlling exactly when it happens - an acceptable trade for
+    // a quad ring buffer, which is written by exactly one thread (the render thread, via
+    // Minecraft.execute in ExceptionalVisionClient#onRegionCached) and never at the same
+    // time as a draw reads it (both happen serially within the same frame's render-thread
+    // work, never concurrently on separate threads).
+    private ByteBuffer quadBufferMapped;
+
+    private GpuCapabilities capabilities;
+
     public void create() {
+        create(GpuCapabilities.detect());
+    }
+
+    /**
+     * @param capabilities capability snapshot to size/allocate buffers appropriately -
+     *                     see {@link #quadBufferPersistent}. Passed in explicitly
+     *                     (rather than calling {@link GpuCapabilities#detect()} again
+     *                     here) so this class doesn't need its own GL-context-current
+     *                     assumption beyond what its caller already established, and so
+     *                     {@link LodGpuPipeline#init()} - which already called
+     *                     {@code detect()} once for its own gating - doesn't do so twice.
+     */
+    public void create(GpuCapabilities capabilities) {
+        this.capabilities = capabilities;
         nodeBuffer = glGenBuffers();
         quadBuffer = glGenBuffers();
         materialBuffer = glGenBuffers();
@@ -84,8 +131,8 @@ public final class LodGpuBuffers implements AutoCloseable {
 
         ByteBuffer quads = cacheData.quadsBuffer();
         this.quadCapacityBytes = quads.remaining();
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, quadBuffer);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, quads, GL_STATIC_DRAW);
+        allocateQuadBuffer(quadBuffer, quadCapacityBytes);
+        writeQuadBytes(0L, quads);
 
         uploadMaterialsFull(materialColors);
         resizeDrawScratch(maxDrawCommands);
@@ -150,8 +197,7 @@ public final class LodGpuBuffers implements AutoCloseable {
 
             ByteBuffer quads = cacheData.quadsBuffer();
             quads.position((int) oldBytes); // only the new tail - everything before is already on the GPU
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, quadBuffer);
-            glBufferSubData(GL_SHADER_STORAGE_BUFFER, oldBytes, quads);
+            writeQuadBytes(oldBytes, quads);
             this.quadCount = newQuadCount;
         }
 
@@ -179,6 +225,15 @@ public final class LodGpuBuffers implements AutoCloseable {
      * GPU-side copy (no CPU round trip) into a new, larger buffer object - unlike
      * {@link #ensureNodeCapacity}, {@link #uploadIncremental} only uploads quads' new
      * *tail* afterwards, so whatever was already there must survive the resize.
+     * <p>
+     * Growing a persistent-mapped buffer in place isn't possible (its storage is
+     * immutable once {@code glBufferStorage} allocates it - that's the whole point of
+     * the "persistent" contract), so growth always means: allocate a new, larger
+     * buffer (mapped or not, matching {@link #quadBufferPersistent}), GPU-side-copy the
+     * existing content across, unmap/delete the old one. This is exactly as expensive
+     * as the stage-4 growth path was - the *steady-state* append case (the overwhelming
+     * majority of calls, since capacity typically outpaces one region's worth of new
+     * quads) is what persistent mapping actually speeds up, via {@link #writeQuadBytes}.
      */
     private void ensureQuadCapacity(long neededBytes) {
         if (neededBytes <= quadCapacityBytes) {
@@ -186,8 +241,7 @@ public final class LodGpuBuffers implements AutoCloseable {
         }
         long newCapacity = Math.max(neededBytes, Math.max(quadCapacityBytes * 2, 1024));
         int newBuffer = glGenBuffers();
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, newBuffer);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, newCapacity, GL_STATIC_DRAW);
+        allocateQuadBuffer(newBuffer, newCapacity);
 
         long existingUsedBytes = this.quadCount * (long) PackedQuad.BYTES;
         if (existingUsedBytes > 0) {
@@ -198,9 +252,63 @@ public final class LodGpuBuffers implements AutoCloseable {
             glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
         }
 
+        unmapQuadBufferIfMapped();
         glDeleteBuffers(quadBuffer);
         quadBuffer = newBuffer;
         quadCapacityBytes = newCapacity;
+    }
+
+    /**
+     * (Re)allocates {@code bufferId}'s storage to exactly {@code capacityBytes}, either
+     * as a persistent-mapped store (if {@link GpuCapabilities#persistentMappingSupported()})
+     * or as an ordinary mutable store (the stage-4 fallback). Updates
+     * {@link #quadBufferMapped}/{@link #quadBufferPersistent} to describe whichever
+     * path was taken - callers must not assume the previous call's path still applies.
+     */
+    private void allocateQuadBuffer(int bufferId, long capacityBytes) {
+        unmapQuadBufferIfMapped();
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, bufferId);
+        if (capabilities != null && capabilities.persistentMappingSupported()) {
+            int storageFlags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+            glBufferStorage(GL_SHADER_STORAGE_BUFFER, capacityBytes, storageFlags);
+            int mapFlags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+            quadBufferMapped = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0L, capacityBytes, mapFlags);
+            quadBufferPersistent = true;
+        } else {
+            glBufferData(GL_SHADER_STORAGE_BUFFER, capacityBytes, GL_STATIC_DRAW);
+            quadBufferMapped = null;
+            quadBufferPersistent = false;
+        }
+    }
+
+    /**
+     * Writes {@code src.remaining()} bytes at {@code offsetBytes} into the quad buffer -
+     * a {@code memcpy} into the persistent-mapped pointer when available (no GL call, no
+     * sync point), or an ordinary {@code glBufferSubData} otherwise.
+     */
+    private void writeQuadBytes(long offsetBytes, ByteBuffer src) {
+        if (quadBufferPersistent && quadBufferMapped != null) {
+            ByteBuffer dst = quadBufferMapped.duplicate();
+            dst.order(src.order());
+            dst.position((int) offsetBytes);
+            dst.put(src);
+            // GL_MAP_COHERENT_BIT means no glFlushMappedBufferRange/glMemoryBarrier is
+            // needed here for the write to become visible to a subsequent GPU read -
+            // that visibility guarantee is exactly what COHERENT buys over a plain
+            // PERSISTENT mapping (which would need an explicit flush).
+        } else {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, quadBuffer);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, offsetBytes, src);
+        }
+    }
+
+    /** Unmaps {@link #quadBufferMapped} if a mapping is currently active - must happen before deleting or reallocating the buffer object it points into. */
+    private void unmapQuadBufferIfMapped() {
+        if (quadBufferMapped != null) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, quadBuffer);
+            glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+            quadBufferMapped = null;
+        }
     }
 
     /** (Re)allocates the pure-scratch visible-index / indirect-command buffers to fit {@code drawCommandCapacity} - their content is fully rewritten by the cull compute shader every frame, so nothing to preserve on resize. */
@@ -236,10 +344,14 @@ public final class LodGpuBuffers implements AutoCloseable {
         // different world/dimension's cache) would wrongly treat its data as a
         // continuation of whatever used to be here and try to diff against it. The
         // underlying GL buffer objects are left as-is (still sized from before); that's
-        // fine, the next full upload() will glBufferData them to the new exact size
-        // regardless of what's currently allocated.
+        // fine, the next full upload() will glBufferData/glBufferStorage them to the new
+        // exact size regardless of what's currently allocated - which, for a persistent-
+        // mapped quad buffer, requires unmapping first (glBufferStorage on an
+        // already-mapped buffer is invalid), hence the unmap here rather than leaving it
+        // to upload()'s allocateQuadBuffer() to discover it's still mapped.
         nodeCapacityBytes = 0;
         quadCapacityBytes = 0;
+        unmapQuadBufferIfMapped();
     }
 
     public void bindForCompute() {
@@ -289,8 +401,31 @@ public final class LodGpuBuffers implements AutoCloseable {
         return maxDrawCommands;
     }
 
+    /**
+     * Issues the GPU-resident, zero-readback multi-draw (stage 5's "full path" - see
+     * {@link GpuCapabilities#indirectCountSupported()}): the GPU itself reads the
+     * current draw count out of {@link #drawCounterBuffer} when executing the indirect
+     * draw, rather than the CPU reading it back first and passing it explicitly (that's
+     * {@link #readDrawCount()} + the caller's own {@code glMultiDrawArraysIndirect} -
+     * the stage-4 fallback). Requires {@code GL_PARAMETER_BUFFER_ARB}/{@code
+     * GL_PARAMETER_BUFFER} to be bound to {@link #drawCounterBuffer} - see LWJGL's
+     * {@code glMultiDrawArraysIndirectCount} binding, which takes it as an explicit
+     * buffer bind rather than a separate parameter.
+     *
+     * @param mode        primitive mode (e.g. {@code GL_TRIANGLES})
+     * @param maxDrawCount upper bound on how many draw commands the GPU may read -
+     *                     {@link #maxDrawCommands} (buffers are sized for the worst case
+     *                     of every node being visible), same bound {@link #readDrawCount()}
+     *                     clamps against on the fallback path.
+     */
+    public void multiDrawIndirectCount(int mode, int maxDrawCount) {
+        glBindBuffer(GL_PARAMETER_BUFFER, drawCounterBuffer);
+        glMultiDrawArraysIndirectCount(mode, 0L, 0L, maxDrawCount, 0);
+    }
+
     @Override
     public void close() {
+        unmapQuadBufferIfMapped();
         glDeleteBuffers(nodeBuffer);
         glDeleteBuffers(quadBuffer);
         glDeleteBuffers(materialBuffer);

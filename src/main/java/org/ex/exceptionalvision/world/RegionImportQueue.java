@@ -49,9 +49,32 @@ public final class RegionImportQueue implements AutoCloseable {
     // back-to-back) that reliably meant "most regions never get a single successful
     // read all session" - confirmed by a real run where every region but one failed this
     // way and was never retried. A few short, capped retries turns "file caught mid-write"
-    // back into "processed a little late" instead of "never processed".
-    private static final int MAX_READ_RETRIES = 5;
-    private static final long RETRY_DELAY_MS = 750;
+    // back into "processed a little late" instead of "never processed" - PROVIDED the
+    // file is only briefly mid-write, which isn't always true (see FIX below).
+    private static final int FAST_RETRY_ATTEMPTS = 5;
+    private static final long FAST_RETRY_DELAY_MS = 750;
+
+    // FIX (found via a real playtest log: a freshly-generated region at the edge of
+    // explored territory - i.e. exactly the region a player flying forward with a large
+    // render distance keeps hitting - failed all FAST_RETRY_ATTEMPTS with
+    // "EOFException: Unexpected end of region file at position 0" and was then never
+    // retried again for the rest of the session, because the player logged out ~2
+    // seconds after the last fast retry, before WorldDirectoryWatcher's only remaining
+    // chance - a FUTURE ENTRY_MODIFY event on that exact file - had time to fire). A
+    // brand-new region file can sit at "created but still empty" for much longer than
+    // FAST_RETRY_ATTEMPTS * FAST_RETRY_DELAY_MS (3.75s total) covers, especially under
+    // load from a large render distance plus a heavy modpack all generating terrain at
+    // once - the server hasn't necessarily written a single chunk into it yet by the
+    // time this mod's own file-system watcher notices the file was created. Relying
+    // solely on WorldDirectoryWatcher to eventually notice a LATER write is fragile:
+    // it only fires on an actual subsequent ENTRY_MODIFY, which may not happen again
+    // for a while if chunk generation in that direction pauses (player stops flying
+    // that way), and by design it's a one-shot debounced notification, not a retry
+    // loop with its own backoff. Once fast retries are exhausted, this class now takes
+    // over the file's continued retrying itself, indefinitely, at a slower cadence -
+    // exactly the same self-healing behavior WorldDirectoryWatcher provides for
+    // genuinely-changed files, but not dependent on one actually arriving.
+    private static final long SLOW_RETRY_DELAY_MS = 5_000;
 
     private final java.util.Map<Path, Integer> readRetryCounts = new ConcurrentHashMap<>();
     private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -145,7 +168,7 @@ public final class RegionImportQueue implements AutoCloseable {
             readRetryCounts.remove(task.mcaFile()); // this file is fine now, forget any earlier failures
             onRegionRead.accept(new RegionResult(task.coordinate(), chunks));
         } catch (IOException e) {
-            retryOrGiveUp(task, e);
+            retryWithBackoff(task, e);
         } catch (RuntimeException e) {
             // Defensive: a single malformed chunk/section must not kill the worker thread.
             ExceptionalVision.LOGGER.error("Unexpected error processing region file {}", task.mcaFile(), e);
@@ -153,25 +176,47 @@ public final class RegionImportQueue implements AutoCloseable {
     }
 
     /**
-     * Re-queues {@code task} after a short delay, up to {@link #MAX_READ_RETRIES} times,
-     * instead of dropping it after the first failure - see the field javadoc above for
-     * why. Retries run through the same {@link #queue}/worker pool as any other task (at
-     * the task's original priority), the scheduler here only provides the delay.
+     * Re-queues {@code task} after a delay - {@link #FAST_RETRY_DELAY_MS} for the first
+     * {@link #FAST_RETRY_ATTEMPTS} attempts (handles the common "caught mid-write, will
+     * settle in a moment" case cheaply), then {@link #SLOW_RETRY_DELAY_MS} indefinitely
+     * after that (handles the "freshly-created, could stay empty for a while" case - see
+     * {@link #SLOW_RETRY_DELAY_MS}'s javadoc) - never permanently gives up on a file
+     * while this queue is still {@link #running}. Retries run through the same
+     * {@link #queue}/worker pool as any other task (at the task's original priority),
+     * the scheduler here only provides the delay.
      */
-    private void retryOrGiveUp(Task task, IOException cause) {
+    private void retryWithBackoff(Task task, IOException cause) {
         int attempt = readRetryCounts.merge(task.mcaFile(), 1, Integer::sum);
-        if (!running || attempt > MAX_READ_RETRIES) {
-            ExceptionalVision.LOGGER.warn("Failed to read region file {} after {} attempt(s), giving up for this session: {}",
-                    task.mcaFile(), attempt, cause.toString());
-            return;
+        if (!running) {
+            return; // shutting down - don't schedule new work that would outlive this queue
         }
-        ExceptionalVision.LOGGER.debug("Region file {} not ready yet (attempt {}/{}): {} - retrying in {}ms",
-                task.mcaFile(), attempt, MAX_READ_RETRIES, cause.toString(), RETRY_DELAY_MS);
+        long delayMs;
+        if (attempt <= FAST_RETRY_ATTEMPTS) {
+            delayMs = FAST_RETRY_DELAY_MS;
+            ExceptionalVision.LOGGER.debug("Region file {} not ready yet (attempt {}/{}): {} - retrying in {}ms",
+                    task.mcaFile(), attempt, FAST_RETRY_ATTEMPTS, cause.toString(), delayMs);
+        } else {
+            delayMs = SLOW_RETRY_DELAY_MS;
+            if (attempt == FAST_RETRY_ATTEMPTS + 1) {
+                // Only log a WARN once per file, right when it drops to the slow lane -
+                // not never (silent forever-failure is exactly what this class used to
+                // do and is what this whole FIX is about), but not every 5 seconds
+                // either, which would just spam the log for a file that may legitimately
+                // take a while (e.g. the player flew away from that area and generation
+                // paused).
+                ExceptionalVision.LOGGER.warn(
+                        "Region file {} still not ready after {} attempt(s): {} - switching to background retries every {}ms until it succeeds",
+                        task.mcaFile(), attempt, cause.toString(), delayMs);
+            } else {
+                ExceptionalVision.LOGGER.debug("Region file {} still not ready (background attempt {}): {} - retrying in {}ms",
+                        task.mcaFile(), attempt, cause.toString(), delayMs);
+            }
+        }
         retryScheduler.schedule(() -> {
             if (running) {
                 queue.put(new Task(task.coordinate(), task.mcaFile(), task.priority(), sequenceCounter.incrementAndGet()));
             }
-        }, RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
+        }, delayMs, TimeUnit.MILLISECONDS);
     }
 
     @Override
