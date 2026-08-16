@@ -7,7 +7,7 @@
 ## Статус выполнения задач
 
 ### Этап 1: Волна 1 (MVP) — Скелет и Контракты API
-- [ ] **00-project-skeleton** — Создание структуры Gradle-проекта
+- [x] **00-project-skeleton** — Создание структуры Gradle-проекта
 - [ ] **32-project-index** — Инициализация `PROJECT_INDEX.md`
 - [ ] **01-api-sectionpos** — Реализация `SectionPos`
 - [ ] **02-api-storage-interfaces** — Контракты `SectionCache` и `PaletteCodec`
@@ -61,4 +61,42 @@
 
 ## Журнал изменений
 
-*Пока нет записей. Каждое действие будет логироваться здесь.*
+### 00-project-skeleton — [x] готово
+
+Создан multi-module Gradle-проект в `ev/` (settings.gradle.kts, корневой
+build.gradle.kts, gradle.properties, gradle wrapper 8.8) со всеми 7 модулями точно
+по структуре, требуемой тикетом: `ev-api`, `ev-storage`, `ev-meshing` (чистые
+java-library, без NeoForge/LWJGL в classpath, только JDK + fastutil 8.5.13),
+`ev-gpu` (LWJGL 3.3.3 через `compileOnly`/`testImplementation`, единственный модуль
+с GL-зависимостью), `ev-render` (зависит от `ev-api` и `ev-gpu`), `ev-neoforge`
+(плагин `net.neoforged.moddev` 2.0.141, единственный модуль с финальным jar),
+`ev-test` (JUnit 5, зависит от всех модулей).
+
+**Исправление после ревью**: версии NeoForge/parchment/loader изначально были взяты
+через web search и оказались неверными (`neo_version=21.1.172` вместо актуального
+`21.1.235`). Переделано — за основу взяты значения из уже присутствующего в этом же
+репозитории `gradle.properties`/`build.gradle` проекта Exceptional Vision (сосед по
+репо, тот же стек NeoForge/1.21.1), как более надёжный и явно актуальный источник,
+чем поиск: `neo_version=21.1.235`, `neo_version_range=[21,)`,
+`loader_version_range=[4,)`, `parchment_minecraft_version=1.21.11`,
+`parchment_mappings_version=2025.12.20`. `ev-neoforge/build.gradle.kts` переписан по
+структуре эталонного `build.gradle` (runs client/server/gameTestServer/data,
+parchment-блок, `generateModMetadata` task, разворачивающий шаблон
+`neoforge.mods.toml` из `src/main/templates` вместо статичного файла в `resources`).
+
+Создан `ev-neoforge/src/main/templates/META-INF/neoforge.mods.toml` (шаблон с
+`${...}`-плейсхолдерами, разворачиваемый `generateModMetadata`) и entrypoint
+`dev.ev.neoforge.EV` (`@Mod("ev")`, логирует "EV mod loaded" через SLF4J, без
+функциональности — как и требует MVP).
+
+**Не проверено — критерий приёмки №1 (`./gradlew build` завершается успешно)**:
+песочница, в которой выполнялся тикет, разрешает сетевой доступ только к
+ограниченному списку доменов; `services.gradle.org` (откуда `gradlew` тянет
+дистрибутив Gradle 8.8) и `maven.neoforged.net` (репозиторий NeoForge) в этот
+список не входят, поэтому реальная сборка здесь невозможна технически, а не из-за
+ошибки в конфигурации. `gradle-wrapper.jar` восстановлен вручную (отсутствовал в
+исходном репозитории), сам wrapper корректно стартует и падает именно на сетевом
+403 при попытке скачать дистрибутив — то есть до стадии компиляции дело не доходит
+в принципе. **Требуется первый прогон `./gradlew build` и `./gradlew :ev-api:dependencies`
+на машине с обычным доступом в интернет**, прежде чем считать критерии приёмки 1, 2
+и 4 подтверждёнными фактически, а не только по структуре файлов.
