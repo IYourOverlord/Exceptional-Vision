@@ -725,3 +725,44 @@ Gradle.
 `dev.ev.storage.coarsegen`" в "Ключевые классы", исправлена рассинхронизация модульной карты
 (`ev-storage` ошибочно значился "Пусто", хотя тикеты 06-08 уже были отмечены DONE в таблице
 статусов) и раздела "Чего пока не существует".
+
+## Инфраструктурный фикс — ev-storage/build.gradle.kts (2026-08-16, по итогам реального `./gradlew build` пользователя)
+
+Пользователь прогнал `./gradlew build` и получил `:ev-storage:compileJava FAILED`, 32 ошибки:
+`package dev.ev.api.storage does not exist` / `cannot find symbol` на `WorldSectionHandle`,
+`SectionPos`, `MetricsRegistry`, `StorageMetrics` — во всех файлах тикетов 08 и 09
+(`EvictionPolicy`, `LruEvictionPolicy`, `SectionCache`, `SectionLoader`,
+`CoarseSectionGenerator`). Причина ровно та, что уже была зафиксирована в
+`PROJECT_INDEX.md` как известный пробел при работе над тикетом 09: у `ev-storage` не было
+собственного `build.gradle.kts`, поэтому Gradle не подключал к нему зависимость на `ev-api`
+вообще, и компилятор не видел ни один из его пакетов.
+
+Создан `ev-storage/build.gradle.kts` по образцу `ev-meshing/build.gradle.kts` (`java-library`,
+`fastutil`, JUnit 5 через `junit-bom`), с одним осознанным отличием: `ev-api` подключён как
+`api(project(":ev-api"))`, а не `implementation`. Причина — публичные сигнатуры классов
+`ev-storage` напрямую используют типы из `ev-api` (`SectionCache.acquire(...) ->
+WorldSectionHandle`, `CoarseSectionGenerator.generate(WorldSectionHandle)`,
+`metricsSnapshot() -> StorageMetrics`), поэтому любой модуль, зависящий от `ev-storage`
+(`ev-meshing`, `ev-neoforge`), должен видеть эти типы транзитивно — с `implementation` это
+было бы сокрыто и привело бы к точно такой же ошибке `cannot find symbol` уже на уровне
+вышестоящих модулей при их компиляции.
+
+Это не относится ни к одному конкретному тикету 06-09 по отдельности — инфраструктурный
+пробел тикета 00 (создание Gradle-скелета), обнаруженный позже. Не переприсваивается статус
+тикета 00 (он уже помечен DONE с подтверждённым `BUILD SUCCESSFUL` на более раннем прогоне —
+на тот момент `ev-storage` ещё не содержал кода тикетов 06-09, поэтому отсутствие его
+build-файла не проявлялось как ошибка компиляции сразу).
+
+**Подтверждено следующим реальным `./gradlew build` пользователя (2026-08-16)**: `BUILD
+SUCCESSFUL`, и `:ev-storage:test` реально выполнился (не `NO-SOURCE`) — `PaletteCodecTest`,
+`SchemaMigrationChainTest`, `RegionFileHeaderTest`, `SectionCacheTest` (включая конкурентный
+сценарий) и `CoarseSectionGeneratorTest` (тикет 09) все прошли на реальном JVM. Это первое
+фактическое подтверждение тикетов 06-09 реальным прогоном — до этого была только ручная
+верификация вне репозитория. Статусы этих тикетов в таблице "Статус тикетов" выше обновлены
+соответственно.
+
+`PROJECT_INDEX.md` обновлён: раздел "Чего пока не существует" (пункт про отсутствующий
+build-файл превращён в "Исправлено", с описанием симптома/причины/фикса), таблица "Статус
+тикетов" (запись тикета 09 больше не говорит "не исправлено, заблокирует сборку" — заменена
+на текущее, менее драматичное состояние), "Модульная карта" (упоминание build-файла у
+`ev-storage`).
