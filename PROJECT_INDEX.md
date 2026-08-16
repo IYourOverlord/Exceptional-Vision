@@ -31,7 +31,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 08-storage-section-cache (mvp/opt) | DONE (mvp) | **SectionCache — MVP (нешардированная) версия активна, opt-версия (шардированная) в банке, не применена.** Реализовано в `dev.ev.storage.cache`: `SectionLoader` (интерфейс), `EvictionPolicy` (интерфейс, идентичен opt-контракту), `LruEvictionPolicy` (LinkedHashMap accessOrder=true, O(1) onInsert/onAccess, не вытесняет refCount>0), `SectionCache` (единый `ConcurrentHashMap<Long,WorldSectionHandle>` + один `ReentrantLock` только вокруг вызовов EvictionPolicy; `shardCountPowerOfTwo` в конструкторе принимается, но игнорируется — задокументировано в Javadoc и на самом параметре, ради сигнатурной совместимости с будущим 08-opt). `acquire` не делает допущений о вызывающем потоке (см. Javadoc, со ссылкой на эмпирический урок Exceptional Vision про render-thread reload). Тесты: `SectionCacheTest` (6 сценариев из тикета, включая конкурентный с 16 потоками/64 позициями/200 итераций через ExecutorService+CountDownLatch) + фейки `FakeWorldSectionHandle`/`FakeSectionLoader`/`NoopMetricsRegistry`. **Реально прогнано реальным Gradle-билдом пользователя (2026-08-16), включая конкурентный сценарий: `:ev-storage:test` → `BUILD SUCCESSFUL`.**|
 | 09-storage-heightmap-coarse-gen | DONE | `HeightmapSource` (интерфейс), `CoarseSectionGenerator` в `dev.ev.storage.coarsegen`. Один сэмпл heightmap на voxel-column (32×32 на секцию, `O(1)`/воксель, не зависит от LOD уровня) в центре покрываемого квадрата. Материал берётся из той же центральной точки (упрощённый вариант, разрешённый текстом тикета — не honest area-majority, задокументировано в Javadoc класса). `isAvailable()==false` → колонка не трогается (оставлена как есть у target), а весь вызов помечается `GenerationResult.complete()==false` — выбранная политика вместо тихого дефолта в воздух, задокументирована в Javadoc `generate()`. Однородность проверяется `PaletteCodec.isUniform` на собранном `flat`-массиве до записи через `setVoxel`; опциональный `MetricsRegistry` в конструкторе инкрементирует `coarsegen.uniformSections` при однородном результате. Тесты: `CoarseSectionGeneratorTest` (9 сценариев, покрывают все 6 пунктов тикета, включая проверку числа вызовов `surfaceHeight`/`surfaceMaterial` == `32*32` на LOD 0 и LOD 6 одинаково — гарантия `O(1)`, не `O(area)`). **Реально прогнано реальным Gradle-билдом пользователя (2026-08-16), после фикса `ev-storage/build.gradle.kts`: `:ev-storage:test` → `BUILD SUCCESSFUL`.**|
 | 10-meshing-occupancy-stage | DONE | `OccupancySet` (bitset `long[512]` над 32³ гридом, `flatIndex = x+y*32+z*32*32`, тот же порядок осей, что и `PaletteCodec`/`WorldSectionHandle`), `OccupancyStage.process(WorldSectionHandle) -> OccupancySet` — первая стадия конвейера мешинга в `dev.ev.meshing.stage`. Fast-path через `WorldSectionHandle.isEmpty()` — не обходит 32768 вокселей для пустой секции. Тесты: `OccupancySetTest` (get/set по углам и произвольным координатам, isEmpty, popCount, снятие бита), `OccupancyStageTest` (fast-path проверен подсчётом вызовов `getVoxel`, sparse-секция, полностью заполненная секция). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — логика тривиальна (прямые битовые операции над `long[]`), критическая часть (индексация угловых координат, popCount, снятие бита) точечно проверена вручную вне репозитория через `java` single-file launcher, без полного дублирования класса — не требовалось ввиду простоты. Требует подтверждения `./gradlew :ev-meshing:test`.|
-| 11-meshing-greedy-mesh-stage | NOT_STARTED | |
+| 11-meshing-greedy-mesh-stage | DONE | `GreedyMeshStage.process(WorldSectionHandle, OccupancySet, MeshingContext) -> List<Quad>` — вторая стадия конвейера мешинга, `dev.ev.meshing.stage`. Единая параметризованная по оси реализация на все 6 направлений (не 6 копий кода): таблицы `NORMAL_AXIS`/`SIGN`/`WIDTH_AXIS`/`HEIGHT_AXIS` кодируют циклическую конвенцию width/height из требования 4a тикета (X→Y→Z→X). Face-видимость и материал берутся с вокселя-источника (не соседа), per требование 3. Fast-path на `occupancy.isEmpty()`. **Задокументирована (в Javadoc класса) конвенция для `MeshingContext.getNeighborBoundaryVoxel(faceDirection, a, b)`, которую сам текст тикетов 03/11 не фиксирует однозначно**: `a` = локальная координата по width-оси, `b` — по height-оси (та же циклическая конвенция) — см. "Межмодульные контракты" ниже, это будет важно для реализации `MeshingContext` в `ev-render`. Тесты: `GreedyMeshStageTest` (9 сценариев: fast-path с подсчётом вызовов контекста, одиночный воксель → 6 quad'ов 1×1, сплошной блок 4×4×4 → 6 quad'ов 4×4 вместо 384 граней, два соседних вокселя разного материала не сливаются, полный слой 32×32 → один quad на сторону, граница секции через `getNeighborBoundaryVoxel` скрывает грань, и 3 отдельных теста на конвенцию width/height для +X/+Y/+Z с заведомо неквадратными областями). `FakeMeshingContext` — новая тестовая заглушка (`ev-meshing/src/test/.../stage`), по умолчанию воздух за границей и identity-материал, со счётчиками вызовов и переопределяемым `BoundaryLookup`. **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** (см. ограничения песочницы ниже) — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 12-meshing-material-bin-stage | NOT_STARTED | |
 | 13-meshing-meshlet-pack-stage | NOT_STARTED | |
 | 14-meshing-priority-function | NOT_STARTED | |
@@ -76,7 +76,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
-| ev-meshing | `dev.ev.meshing.stage` | `OccupancySet`/`OccupancyStage` (10) — первая стадия конвейера Occupancy→GreedyMesh→MaterialBin→MeshletPack. Остальные стадии (11-13) ещё не реализованы. |
+| ev-meshing | `dev.ev.meshing.stage` | `OccupancySet`/`OccupancyStage` (10) и `GreedyMeshStage` (11) — первые две стадии конвейера Occupancy→GreedyMesh→MaterialBin→MeshletPack. Стадии 12-13 (material-bin, meshlet-pack) ещё не реализованы. |
 | ev-gpu | — | Пусто. |
 | ev-render | — | Пусто. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
@@ -224,12 +224,36 @@ traversal, если обнаружится нехватка) — сознате�
   мешинга. Fast-path на `WorldSectionHandle.isEmpty()`.
   Файлы: `ev-meshing/src/main/java/dev/ev/meshing/stage/{OccupancySet,OccupancyStage}.java`.
 
+### ev-meshing — `dev.ev.meshing.stage` (тикет 11)
+- `GreedyMeshStage.process(WorldSectionHandle, OccupancySet, MeshingContext) -> List<Quad>` —
+  вторая стадия конвейера мешинга. Для каждого из 6 `faceDirection` и каждого из 32 срезов
+  вдоль нормали строит 32×32 маску видимости+материала, затем жадно покрывает её
+  прямоугольниками одного материала (стандартный greedy-meshing, без квадратичного прохода
+  по уже обработанным ячейкам — сложность `O(6 * 32³)`, как требует тикет). Одна
+  параметризованная по оси реализация на все 6 направлений (таблицы `NORMAL_AXIS`, `SIGN`,
+  `WIDTH_AXIS`, `HEIGHT_AXIS`), не 6 копий кода.
+- Циклическая width/height конвенция (X→Y→Z→X, требование 4a тикета 11): для грани с
+  нормалью по оси N, `width` растёт вдоль следующей оси по циклу, `height` — вдоль оси после
+  неё; `+`/`-` направления одной и той же оси нормали используют одну и ту же конвенцию.
+  `Quad.x/y/z` — координата угла с наименьшими значениями по width/height среди покрытых
+  вокселей, по оси нормали — граница вокселя со стороны грани (`n+1` для `+`-направлений,
+  `n` для `-`-направлений).
+  Файл: `ev-meshing/src/main/java/dev/ev/meshing/stage/GreedyMeshStage.java`.
+  Тесты: `GreedyMeshStageTest`, `FakeMeshingContext` (в `ev-meshing/src/test/.../stage`).
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
   опираться `ev-storage` (ключ кэша секций, тикет 08), `ev-meshing` (приоритет/адресация,
   тикет 14) и `ev-gpu` (кодирование позиции в SSBO, тикет 20). Сигнатура зафиксирована,
   менять между MVP/opt волнами нельзя (см. правило в MVP_INDEX.md).
+- `MeshingContext.getNeighborBoundaryVoxel(faceDirection, a, b)` — тексты тикетов 03 и 11
+  определяют `a`/`b` только как "две локальные координаты, покрывающие эту грань", не
+  фиксируя порядок. `GreedyMeshStage` (тикет 11, единственный текущий вызывающий код)
+  зафиксировал де-факто конвенцию: `a` = координата по width-оси, `b` = координата по
+  height-оси, по той же циклической конвенции (X→Y→Z→X), что и `Quad.width/height`.
+  Будущая реализация `MeshingContext` в `ev-render` обязана следовать этой же конвенции —
+  иначе грани на стыке секций будут скрываться/показываться в неверном месте.
 
 ## Известные архитектурные инварианты
 
@@ -273,7 +297,9 @@ traversal, если обнаружится нехватка) — сознате�
   плану (кроме потенциального дополнения `RenderBackend`/`CommandList` из тикета 21-opt,
   см. выше).
 - Реализация хранилища частично существует (`ev-storage`: тикеты 06-09) и мешинга (`ev-meshing`:
-  тикет 10, первая из четырёх стадий конвейера) — GPU-бэкенда и рендер-оркестрации всё ещё нет.
+  тикеты 10-11, две из четырёх стадий конвейера — occupancy и greedy-mesh; material-bin,
+  тикет 12, и meshlet-pack, тикет 13, ещё не реализованы) — GPU-бэкенда и рендер-оркестрации
+  всё ещё нет.
 - **✅ Исправлено (2026-08-16, отдельная сессия по итогам реального `./gradlew build` пользователя)**:
   `ev-storage/build.gradle.kts` создан. Симптом на реальном билде совпал с тем, что было
   предсказано здесь заранее: `:ev-storage:compileJava FAILED`, 32 ошибки, все одного корня —
