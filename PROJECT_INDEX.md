@@ -30,7 +30,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 07-storage-schema-migration | DONE | `SchemaVersion` (CURRENT=MIN_SUPPORTED=1), `SchemaMigrator` (интерфейс шага), `SchemaMigrationChain` (`migrateToCurrent` + обобщённый `migrateTo(from,to,data)` для тестирования цепочки независимо от CURRENT), `UnsupportedSchemaException`, `RegionFileHeader` (record, 12-байтный заголовок региона: magic "HZR\0" + schemaVersion u16 + compressionCodec u8 + reserved u8 + sectionCount i32 — единственный источник истины для раскладки, задокументирован в Javadoc) — всё в `dev.ev.storage.schema`. Реальных миграторов версий пока нет (CURRENT=1, мигрировать не из чего) — цепочка проверена гипотетическими `TestV1ToV2Migrator`/`TestV2ToV3Migrator`, определёнными только в `SchemaMigrationChainTest`. `RegionFileHeaderTest` — round-trip/bad-magic/too-short/null/zero-sections. **Реально прогнано реальным Gradle-билдом пользователя (2026-08-16): `:ev-storage:test` → `BUILD SUCCESSFUL`.**|
 | 08-storage-section-cache (mvp/opt) | DONE (mvp) | **SectionCache — MVP (нешардированная) версия активна, opt-версия (шардированная) в банке, не применена.** Реализовано в `dev.ev.storage.cache`: `SectionLoader` (интерфейс), `EvictionPolicy` (интерфейс, идентичен opt-контракту), `LruEvictionPolicy` (LinkedHashMap accessOrder=true, O(1) onInsert/onAccess, не вытесняет refCount>0), `SectionCache` (единый `ConcurrentHashMap<Long,WorldSectionHandle>` + один `ReentrantLock` только вокруг вызовов EvictionPolicy; `shardCountPowerOfTwo` в конструкторе принимается, но игнорируется — задокументировано в Javadoc и на самом параметре, ради сигнатурной совместимости с будущим 08-opt). `acquire` не делает допущений о вызывающем потоке (см. Javadoc, со ссылкой на эмпирический урок Exceptional Vision про render-thread reload). Тесты: `SectionCacheTest` (6 сценариев из тикета, включая конкурентный с 16 потоками/64 позициями/200 итераций через ExecutorService+CountDownLatch) + фейки `FakeWorldSectionHandle`/`FakeSectionLoader`/`NoopMetricsRegistry`. **Реально прогнано реальным Gradle-билдом пользователя (2026-08-16), включая конкурентный сценарий: `:ev-storage:test` → `BUILD SUCCESSFUL`.**|
 | 09-storage-heightmap-coarse-gen | DONE | `HeightmapSource` (интерфейс), `CoarseSectionGenerator` в `dev.ev.storage.coarsegen`. Один сэмпл heightmap на voxel-column (32×32 на секцию, `O(1)`/воксель, не зависит от LOD уровня) в центре покрываемого квадрата. Материал берётся из той же центральной точки (упрощённый вариант, разрешённый текстом тикета — не honest area-majority, задокументировано в Javadoc класса). `isAvailable()==false` → колонка не трогается (оставлена как есть у target), а весь вызов помечается `GenerationResult.complete()==false` — выбранная политика вместо тихого дефолта в воздух, задокументирована в Javadoc `generate()`. Однородность проверяется `PaletteCodec.isUniform` на собранном `flat`-массиве до записи через `setVoxel`; опциональный `MetricsRegistry` в конструкторе инкрементирует `coarsegen.uniformSections` при однородном результате. Тесты: `CoarseSectionGeneratorTest` (9 сценариев, покрывают все 6 пунктов тикета, включая проверку числа вызовов `surfaceHeight`/`surfaceMaterial` == `32*32` на LOD 0 и LOD 6 одинаково — гарантия `O(1)`, не `O(area)`). **Реально прогнано реальным Gradle-билдом пользователя (2026-08-16), после фикса `ev-storage/build.gradle.kts`: `:ev-storage:test` → `BUILD SUCCESSFUL`.**|
-| 10-meshing-occupancy-stage | NOT_STARTED | |
+| 10-meshing-occupancy-stage | DONE | `OccupancySet` (bitset `long[512]` над 32³ гридом, `flatIndex = x+y*32+z*32*32`, тот же порядок осей, что и `PaletteCodec`/`WorldSectionHandle`), `OccupancyStage.process(WorldSectionHandle) -> OccupancySet` — первая стадия конвейера мешинга в `dev.ev.meshing.stage`. Fast-path через `WorldSectionHandle.isEmpty()` — не обходит 32768 вокселей для пустой секции. Тесты: `OccupancySetTest` (get/set по углам и произвольным координатам, isEmpty, popCount, снятие бита), `OccupancyStageTest` (fast-path проверен подсчётом вызовов `getVoxel`, sparse-секция, полностью заполненная секция). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — логика тривиальна (прямые битовые операции над `long[]`), критическая часть (индексация угловых координат, popCount, снятие бита) точечно проверена вручную вне репозитория через `java` single-file launcher, без полного дублирования класса — не требовалось ввиду простоты. Требует подтверждения `./gradlew :ev-meshing:test`.|
 | 11-meshing-greedy-mesh-stage | NOT_STARTED | |
 | 12-meshing-material-bin-stage | NOT_STARTED | |
 | 13-meshing-meshlet-pack-stage | NOT_STARTED | |
@@ -76,7 +76,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
-| ev-meshing | — | Пусто. |
+| ev-meshing | `dev.ev.meshing.stage` | `OccupancySet`/`OccupancyStage` (10) — первая стадия конвейера Occupancy→GreedyMesh→MaterialBin→MeshletPack. Остальные стадии (11-13) ещё не реализованы. |
 | ev-gpu | — | Пусто. |
 | ev-render | — | Пусто. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
@@ -216,6 +216,14 @@ traversal, если обнаружится нехватка) — сознате�
   CoarseSectionGenerator}.java`. Тесты: `CoarseSectionGeneratorTest`,
   `FakeHeightmapSource`, `FakeWorldSectionHandle` (в `ev-storage/src/test/.../coarsegen`).
 
+### ev-meshing — `dev.ev.meshing.stage` (тикет 10)
+- `OccupancySet` — bitset `long[512]` над 32³ гридом, `flatIndex(x,y,z) = x+y*32+z*32*32`
+  (совпадает с порядком осей `PaletteCodec`/`WorldSectionHandle` намеренно, см. требование
+  тикета). `get`/`set`/`isEmpty`/`popCount`, без `java.util.BitSet` (hot path).
+- `OccupancyStage.process(WorldSectionHandle) -> OccupancySet` — первая стадия конвейера
+  мешинга. Fast-path на `WorldSectionHandle.isEmpty()`.
+  Файлы: `ev-meshing/src/main/java/dev/ev/meshing/stage/{OccupancySet,OccupancyStage}.java`.
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -264,9 +272,8 @@ traversal, если обнаружится нехватка) — сознате�
   `ev-gpu`/`ev-render`, ни один новый интерфейс в `ev-api` больше не ожидается по
   плану (кроме потенциального дополнения `RenderBackend`/`CommandList` из тикета 21-opt,
   см. выше).
-- Реализация хранилища частично существует (`ev-storage`: тикеты 06-09, см. модульную карту
-  и раздел "Ключевые классы" выше) — ни мешинга, ни GPU-бэкенда, ни рендер-оркестрации всё
-  ещё нет.
+- Реализация хранилища частично существует (`ev-storage`: тикеты 06-09) и мешинга (`ev-meshing`:
+  тикет 10, первая из четырёх стадий конвейера) — GPU-бэкенда и рендер-оркестрации всё ещё нет.
 - **✅ Исправлено (2026-08-16, отдельная сессия по итогам реального `./gradlew build` пользователя)**:
   `ev-storage/build.gradle.kts` создан. Симптом на реальном билде совпал с тем, что было
   предсказано здесь заранее: `:ev-storage:compileJava FAILED`, 32 ошибки, все одного корня —
