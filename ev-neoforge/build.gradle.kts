@@ -1,6 +1,11 @@
+// Версия плагина net.neoforged.moddev резолвится централизованно в
+// settings.gradle.kts -> pluginManagement { plugins { ... } }, поэтому здесь версия не
+// указывается. Указывать версию прямо здесь нельзя: блок plugins {} компилируется
+// изолированно от остального скрипта и не видит val/property(), объявленные в теле
+// этого же файла (ни до, ни после).
 plugins {
     id("java-library")
-    id("net.neoforged.moddev") version "${property("moddevgradle_version")}"
+    id("net.neoforged.moddev")
 }
 
 base {
@@ -67,19 +72,25 @@ dependencies {
 
 // Разворачивает шаблон neoforge.mods.toml (в src/main/templates) в build/generated —
 // повторяет паттерн generateModMetadata из эталонного build.gradle Exceptional Vision.
+//
+// Свойства читаются через providers.gradleProperty(...).get(), а не через property(...):
+// внутри tasks.register<T>("name") { ... } конфигурация может выполняться в момент, когда
+// обычный property() ещё не гарантированно резолвит properties проекта (в частности, при
+// материализации таска через ideSyncTask), тогда как provider-based API создан именно для
+// надёжного ленивого чтения gradle.properties в любой точке конфигурации.
 val generateModMetadata = tasks.register<ProcessResources>("generateModMetadata") {
     val replaceProperties = mapOf(
-        "minecraft_version" to property("minecraft_version"),
-        "minecraft_version_range" to property("minecraft_version_range"),
-        "neo_version" to property("neo_version"),
-        "neo_version_range" to property("neo_version_range"),
-        "loader_version_range" to property("loader_version_range"),
-        "mod_id" to property("mod_id"),
-        "mod_name" to property("mod_name"),
-        "mod_license" to property("mod_license"),
-        "mod_version" to property("mod_version"),
-        "mod_authors" to property("mod_authors"),
-        "mod_description" to property("mod_description")
+        "minecraft_version" to providers.gradleProperty("minecraft_version").get(),
+        "minecraft_version_range" to providers.gradleProperty("minecraft_version_range").get(),
+        "neo_version" to providers.gradleProperty("neo_version").get(),
+        "neo_version_range" to providers.gradleProperty("neo_version_range").get(),
+        "loader_version_range" to providers.gradleProperty("loader_version_range").get(),
+        "mod_id" to providers.gradleProperty("mod_id").get(),
+        "mod_name" to providers.gradleProperty("mod_name").get(),
+        "mod_license" to providers.gradleProperty("mod_license").get(),
+        "mod_version" to providers.gradleProperty("mod_version").get(),
+        "mod_authors" to providers.gradleProperty("mod_authors").get(),
+        "mod_description" to providers.gradleProperty("mod_description").get()
     )
     inputs.properties(replaceProperties)
     expand(replaceProperties)

@@ -46,12 +46,21 @@ public record SectionPos(int level, int x, int y, int z) {
     /**
      * Decodes a {@code long} previously produced by {@link #encode()} back into a
      * {@link SectionPos}. Sign-extends the y (8-bit), z (26-bit) and x (26-bit) fields.
+     *
+     * <p>Note on the shift amounts for x/z: each field is first isolated into the low 32
+     * bits of an {@code int} (by an unsigned right-shift of the 64-bit id, or none for x),
+     * then sign-extended within that 32-bit int via {@code << 6 >> 6} — 6 = 32 - 26, the
+     * width of the field's own 32-bit container, not 64 - 26. Using 64 - 26 = 38 here would
+     * be wrong: Java masks int shift amounts to their low 5 bits (amount % 32), so a shift
+     * of 38 on an int silently becomes a shift of 6 anyway, but only by coincidence of
+     * matching bit widths elsewhere — relying on that wrap is fragile and was in fact the
+     * source of a real round-trip bug fixed here (see PROGRESS.md, багфикс 5).
      */
     public static SectionPos decode(long id) {
         int level = (int) (id >>> 60) & 0xF;
         int y = (byte) (id >>> 52); // sign-extends automatically via byte cast
-        int z = (int) (id << (64 - 52)) >> (64 - 26); // sign-extend 26-bit field
-        int x = (int) (id << (64 - 26)) >> (64 - 26); // sign-extend 26-bit field
+        int z = (int) (id >>> 26) << 6 >> 6; // isolate 26-bit z field into int, sign-extend
+        int x = (int) id << 6 >> 6;          // isolate 26-bit x field into int, sign-extend
         return new SectionPos(level, x, y, z);
     }
 
