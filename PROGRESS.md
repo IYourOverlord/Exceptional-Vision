@@ -591,3 +591,38 @@ magic-number bit-spreading — обоснование (для 5-битного �
 
 `PROJECT_INDEX.md` обновлён: статус тикета 06 → DONE, с пометкой о неподтверждённой
 Gradle-сборке (см. таблицу тикетов).
+
+## Тикет 07 — SchemaVersion/SchemaMigrationChain/RegionFileHeader (2026-08-16, отдельная сессия)
+
+Реализован пакет `dev.ev.storage.schema` в `ev-storage`, строго по контракту тикета
+`07-storage-schema-migration.md`: `SchemaVersion`, `SchemaMigrator`, `SchemaMigrationChain`,
+`UnsupportedSchemaException`, `RegionFileHeader`.
+
+**Дизайн-решение, отклоняющееся от буквального сигнатурного минимума контракта (но в рамках
+разрешённой тикетом свободы)**: помимо `migrateToCurrent(fromVersion, data)` из контракта,
+добавлен обобщённый публичный `migrateTo(fromVersion, toVersion, data)` — сама
+`migrateToCurrent` теперь просто `migrateTo(fromVersion, SchemaVersion.CURRENT, data)`. Это
+прямо подсказано текстом тикета ("протестируй chain-логику отдельно от
+`SchemaVersion.CURRENT`, если конструктор/метод это позволяет") — без этого протестировать
+трёхверсионную цепочку (1→2→3) было бы невозможно, пока `CURRENT` реально не станет 3.
+Тесты цепочки используют `migrateTo` напрямую с гипотетическими `TestV1ToV2Migrator`/
+`TestV2ToV3Migrator`, определёнными только в `SchemaMigrationChainTest` (как и требовал
+тикет — никакой fake-миграции в основном коде, поскольку реальной версии 0/2 пока не
+существует).
+
+**Формат заголовка региона** (12 байт, задокументирован в Javadoc `RegionFileHeader`, единый
+источник истины): `magic("HZR\0", 4 байта)` + `schemaVersion(u16 BE)` + `compressionCodec(u8,
+0=none/1=deflate зарезервировано)` + `reserved(u8, всегда 0 при записи)` +
+`sectionCount(i32)`. `parse()` бросает `IllegalArgumentException` и на несовпадающих magic-
+байтах, и на массиве короче `HEADER_SIZE_BYTES` (включая `null`) — оба случая явно
+задокументированы и покрыты тестами.
+
+**Компиляция/тесты**: как и в тикете 06, песочница без `javac`/Gradle — вся логика
+(`SchemaMigrationChain.migrateTo/migrateToCurrent`, обработка гэпа в цепочке, duplicate-
+migrator в конструкторе, `RegionFileHeader` round-trip/bad-magic/too-short) построчно
+скопирована в отдельный `Verify7.java` вне репозитория и прогнана через
+`java Verify7.java` — все 10 проверок прошли. Не замена реальному
+`./gradlew :ev-storage:test` — `SchemaMigrationChainTest`/`RegionFileHeaderTest` в
+репозитории написаны и ждут прогона в сессии с доступом к Gradle.
+
+`PROJECT_INDEX.md` обновлён: статус тикета 07 → DONE.
