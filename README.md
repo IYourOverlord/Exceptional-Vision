@@ -12,9 +12,8 @@
 ## Структура архива
 
 ```
-ev-full-package/
+
 ├── README.md                          — этот файл
-├── ARCHITECTURE.md                    — исходное архитектурное обоснование (справочно)
 ├── PERFORMANCE_MATH.md                — математика холодного старта / steady-state (справочно)
 ├── notes_voxy_analysis.md             — разбор прототипа Voxy, с которого начался проект
 ├── exceptional-vision-vs-ev.md   — сравнительный анализ независимой реализации
