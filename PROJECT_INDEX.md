@@ -26,7 +26,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 03-api-meshing-interfaces | DONE | `MeshingContext`, `Quad`, `Meshlet`, `MeshletBatch`, `MeshBuilder` созданы дословно по контракту. |
 | 04-api-renderbackend-interfaces | DONE | 13 типов в `dev.ev.api.gpu` созданы дословно по контракту (по одному публичному типу на файл). Никаких LWJGL/NeoForge импортов — проверено. Пункт 4 требований (доп. методы для persistent-traversal) сознательно не применён — см. PROGRESS.md. |
 | 05-api-metrics-interfaces | DONE | `MetricsRegistry`, `MetricsSnapshot`, `ImportStageStatus` созданы дословно. Последний из пяти api-тикетов — весь `ev-api` теперь укомплектован контрактами (01-05). |
-| 06-storage-palette-codec | NOT_STARTED | |
+| 06-storage-palette-codec | DONE | `PaletteCodec` (+ `MortonCode`, `BitPackedArray`, `RunLengthCodec`) в `dev.ev.storage.codec`. Формат: `SINGLE_VALUE` (tag 0, 8 байт) для однородных секций, `PALETTE_RLE` (tag 1) — палитра (индекс 0 = значение 0/воздух, если оно присутствует) + Z-order (Morton) обход + RLE + плотная битовая упаковка run-значений. `PaletteCodecTest` (JUnit 5) написан. **Компиляция/тесты НЕ прогнаны реальным Gradle-билдом в этой сессии** (песочница без `javac`/Gradle-доступа — см. `EV_SESSION_PROMPT.md`, раздел про компиляцию); логика алгоритма (round-trip, Morton bit-interleaving, isUniform, обработка ошибок размера, компрессия однородного случая = 8 байт) отдельно верифицирована вручную вне репозитория идентичной копией кода через `java` (single-file launcher), все проверки прошли. Требует подтверждения `./gradlew :ev-storage:test` в следующей сессии.|
 | 07-storage-schema-migration | NOT_STARTED | |
 | 08-storage-section-cache (mvp/opt) | NOT_STARTED | |
 | 09-storage-heightmap-coarse-gen | NOT_STARTED | |
