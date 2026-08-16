@@ -29,7 +29,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 06-storage-palette-codec | DONE | `PaletteCodec` (+ `MortonCode`, `BitPackedArray`, `RunLengthCodec`) в `dev.ev.storage.codec`. Формат: `SINGLE_VALUE` (tag 0, 8 байт) для однородных секций, `PALETTE_RLE` (tag 1) — палитра (индекс 0 = значение 0/воздух, если оно присутствует) + Z-order (Morton) обход + RLE + плотная битовая упаковка run-значений. `PaletteCodecTest` (JUnit 5) написан. **Компиляция/тесты НЕ прогнаны реальным Gradle-билдом в этой сессии** (песочница без `javac`/Gradle-доступа — см. `EV_SESSION_PROMPT.md`, раздел про компиляцию); логика алгоритма (round-trip, Morton bit-interleaving, isUniform, обработка ошибок размера, компрессия однородного случая = 8 байт) отдельно верифицирована вручную вне репозитория идентичной копией кода через `java` (single-file launcher), все проверки прошли. Требует подтверждения `./gradlew :ev-storage:test` в следующей сессии.|
 | 07-storage-schema-migration | DONE | `SchemaVersion` (CURRENT=MIN_SUPPORTED=1), `SchemaMigrator` (интерфейс шага), `SchemaMigrationChain` (`migrateToCurrent` + обобщённый `migrateTo(from,to,data)` для тестирования цепочки независимо от CURRENT), `UnsupportedSchemaException`, `RegionFileHeader` (record, 12-байтный заголовок региона: magic "HZR\0" + schemaVersion u16 + compressionCodec u8 + reserved u8 + sectionCount i32 — единственный источник истины для раскладки, задокументирован в Javadoc) — всё в `dev.ev.storage.schema`. Реальных миграторов версий пока нет (CURRENT=1, мигрировать не из чего) — цепочка проверена гипотетическими `TestV1ToV2Migrator`/`TestV2ToV3Migrator`, определёнными только в `SchemaMigrationChainTest`. `RegionFileHeaderTest` — round-trip/bad-magic/too-short/null/zero-sections. **Компиляция/тесты не прогнаны реальным Gradle-билдом** (та же причина, что и в тикете 06 — нет `javac` в песочнице), логика отдельно верифицирована вручную вне репозитория идентичной копией кода через `java` single-file launcher, все 10 проверок прошли. Требует подтверждения `./gradlew :ev-storage:test`.|
 | 08-storage-section-cache (mvp/opt) | DONE (mvp) | **SectionCache — MVP (нешардированная) версия активна, opt-версия (шардированная) в банке, не применена.** Реализовано в `dev.ev.storage.cache`: `SectionLoader` (интерфейс), `EvictionPolicy` (интерфейс, идентичен opt-контракту), `LruEvictionPolicy` (LinkedHashMap accessOrder=true, O(1) onInsert/onAccess, не вытесняет refCount>0), `SectionCache` (единый `ConcurrentHashMap<Long,WorldSectionHandle>` + один `ReentrantLock` только вокруг вызовов EvictionPolicy; `shardCountPowerOfTwo` в конструкторе принимается, но игнорируется — задокументировано в Javadoc и на самом параметре, ради сигнатурной совместимости с будущим 08-opt). `acquire` не делает допущений о вызывающем потоке (см. Javadoc, со ссылкой на эмпирический урок Exceptional Vision про render-thread reload). Тесты: `SectionCacheTest` (6 сценариев из тикета, включая конкурентный с 16 потоками/64 позициями/200 итераций через ExecutorService+CountDownLatch) + фейки `FakeWorldSectionHandle`/`FakeSectionLoader`/`NoopMetricsRegistry`. **Компиляция/тесты не прогнаны реальным Gradle-билдом** (по-прежнему нет `javac` в песочнице) — вся логика, включая конкурентный сценарий и LRU-пропуск held-записей, отдельно верифицирована вручную вне репозитория через `java` single-file launcher, все 9 проверок прошли. Требует подтверждения `./gradlew :ev-storage:test`.|
-| 09-storage-heightmap-coarse-gen | NOT_STARTED | |
+| 09-storage-heightmap-coarse-gen | DONE | `HeightmapSource` (интерфейс), `CoarseSectionGenerator` в `dev.ev.storage.coarsegen`. Один сэмпл heightmap на voxel-column (32×32 на секцию, `O(1)`/воксель, не зависит от LOD уровня) в центре покрываемого квадрата. Материал берётся из той же центральной точки (упрощённый вариант, разрешённый текстом тикета — не honest area-majority, задокументировано в Javadoc класса). `isAvailable()==false` → колонка не трогается (оставлена как есть у target), а весь вызов помечается `GenerationResult.complete()==false` — выбранная политика вместо тихого дефолта в воздух, задокументирована в Javadoc `generate()`. Однородность проверяется `PaletteCodec.isUniform` на собранном `flat`-массиве до записи через `setVoxel`; опциональный `MetricsRegistry` в конструкторе инкрементирует `coarsegen.uniformSections` при однородном результате. Тесты: `CoarseSectionGeneratorTest` (9 сценариев, покрывают все 6 пунктов тикета, включая проверку числа вызовов `surfaceHeight`/`surfaceMaterial` == `32*32` на LOD 0 и LOD 6 одинаково — гарантия `O(1)`, не `O(area)`). **Компиляция/тесты не прогнаны реальным Gradle-билдом** (по-прежнему нет `javac` в песочнице) — идентичная копия алгоритма отдельно верифицирована вручную вне репозитория через `java` single-file launcher, 21 проверка, все прошли. Требует подтверждения `./gradlew :ev-storage:test`. **Обнаружено, не исправлено в рамках этого тикета**: у `ev-storage` по-прежнему нет собственного `build.gradle.kts` (см. "Чего пока не существует" ниже) — не блокирует написание кода тикета 09, но заблокирует реальную сборку модуля целиком, включая уже существующие тикеты 06-08.|
 | 10-meshing-occupancy-stage | NOT_STARTED | |
 | 11-meshing-greedy-mesh-stage | NOT_STARTED | |
 | 12-meshing-material-bin-stage | NOT_STARTED | |
@@ -75,7 +75,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 |---|---|---|
 | ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
-| ev-storage | — | Пусто. |
+| ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). **⚠️ Не соответствовало этому файлу до тикета 09** — таблица "Статус тикетов" отмечала 06-08 как DONE, но эта строка ошибочно оставалась "Пусто" (не обновлена в своё время); исправлено сейчас, заодно см. следующее примечание про `build.gradle.kts`. |
 | ev-meshing | — | Пусто. |
 | ev-gpu | — | Пусто. |
 | ev-render | — | Пусто. |
@@ -198,6 +198,24 @@ traversal, если обнаружится нехватка) — сознате�
 (`completionFraction()` — 0/0 не NaN, обычная дробь, `empty()`, полное завершение).
 Оба явно требуются критериями приёмки 3 и 4 тикета.
 
+### ev-storage — `dev.ev.storage.coarsegen` (тикет 09)
+- `HeightmapSource` — интерфейс, адаптер к внешнему источнику высоты/материала по
+  колонке (worldX, worldZ): `surfaceHeight`, `surfaceMaterial`, `isAvailable`. Реализация
+  под реальный Minecraft `Heightmap`/`ChunkAccess` — вне этого тикета, будет в
+  `ev-neoforge`.
+- `CoarseSectionGenerator(HeightmapSource[, MetricsRegistry])` — `generate(WorldSectionHandle)
+  -> GenerationResult(complete, uniform)`. Один сэмпл heightmap в центре каждого из 32×32
+  voxel-column квадратов секции (не по углу — без систематического смещения), `O(1)` на
+  воксель, не зависит от `sizeInBlocks()`. Вертикальное заполнение: material от `localY=0`
+  до `quantizedSurfaceLocalY` включительно, выше — воздух; клампится в `-1..32` как
+  сентинелы "вся секция воздух"/"вся секция material". `isAvailable()==false` для сэмплируемой
+  точки → колонка не перезаписывается (оставлена как есть у `target`), `GenerationResult
+  .complete()` становится `false` для всего вызова — явный сигнал вызывающему коду для
+  повторной генерации позже, вместо неотличимого от честного результата дефолта в воздух.
+  Файлы: `ev-storage/src/main/java/dev/ev/storage/coarsegen/{HeightmapSource,
+  CoarseSectionGenerator}.java`. Тесты: `CoarseSectionGeneratorTest`,
+  `FakeHeightmapSource`, `FakeWorldSectionHandle` (в `ev-storage/src/test/.../coarsegen`).
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -246,7 +264,17 @@ traversal, если обнаружится нехватка) — сознате�
   `ev-gpu`/`ev-render`, ни один новый интерфейс в `ev-api` больше не ожидается по
   плану (кроме потенциального дополнения `RenderBackend`/`CommandList` из тикета 21-opt,
   см. выше).
-- Ни одной реализации хранилища, мешинга, GPU-бэкенда или рендер-оркестрации.
+- Реализация хранилища частично существует (`ev-storage`: тикеты 06-09, см. модульную карту
+  и раздел "Ключевые классы" выше) — ни мешинга, ни GPU-бэкенда, ни рендер-оркестрации всё
+  ещё нет.
+- **⚠️ `ev-storage/build.gradle.kts` отсутствует** (обнаружено при работе над тикетом 09,
+  не в его рамках — не создан ни в один из тикетов 06-09). `settings.gradle.kts` включает
+  `ev-storage` как подпроект, и другие модули (`ev-meshing`, `ev-neoforge`, `ev-test`)
+  уже ссылаются на него через `implementation(project(":ev-storage"))`/`api(...)`, но без
+  собственного build-файла Gradle не сможет применить `java-library`/зависимости
+  (`fastutil`, JUnit) к этому подпроекту — `./gradlew build` в текущем виде репозитория,
+  скорее всего, упадёт на конфигурации `ev-storage`. Не исправлено самостоятельно (не
+  предмет тикета 09), фиксируется здесь как известный пробел до отдельного решения.
 - В `ev-test` (модуль для интеграционных/кросс-модульных тестов) по-прежнему ни одного
   тестового класса — `SectionPosTest` (тикет 01) лежит в `ev-api/src/test`, не в
   `ev-test`, так как тикет 01 самодостаточен и не требует зависимостей других модулей.

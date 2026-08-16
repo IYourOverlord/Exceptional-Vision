@@ -1,55 +1,50 @@
-# EV — полный пакет документов проекта
+# EV — far-render/LOD мод для NeoForge 1.21.1 (Java 21)
 
-## С чего начать
+GPU-driven LOD-рендеринг дальней прорисовки мира. Октодерево-хранилище воксельных секций,
+мешинг в meshlet'ы, compute-driven traversal/culling, OpenGL 4.5+ (LWJGL, уже в составе
+Minecraft/NeoForge). Две цели оптимизации: throughput холодного старта и дешёвый
+steady-state кадр.
 
-1. **`tickets/MVP_INDEX.md`** — главный навигатор. Вставляй этот файл целиком в новую
-   сессию Клода первым сообщением, вместе с текстом одного нужного тикета из папки `tickets/`.
-2. **`tickets/MODEL_ASSIGNMENT.md`** — какие тикеты можно доверить Sonnet, какие требуют Opus
-   (и почему), с учётом двухволновой MVP/opt структуры.
-3. **`tickets/P0-profiling-checkpoint.md`** — обязательный чекпоинт между Волной 1 (MVP) и
-   Волной 2 (opt-оптимизации) — не пропускай его.
+## Ориентация для новой сессии — что читать и в каком порядке
 
-## Структура архива
+1. **`PROJECT_INDEX.md`** — источник истины по текущему состоянию кода: какие тикеты
+   реализованы, где именно лежит какой класс, известные несоответствия/незакрытые вопросы.
+   Читай его, не обходи модули руками.
+2. **`tickets/MVP_INDEX.md`** — план тикетов и правила двухволновой MVP/opt структуры.
+   Вставляется первым сообщением новой сессии вместе с текстом одного тикета.
+3. **`EV_SESSION_PROMPT.md`** — системная рамка для сессии, выполняющей один тикет
+   (технические договорённости, порядок работы, обязательная выдача архива в конце).
+4. **`tickets/MODEL_ASSIGNMENT.md`** — какие тикеты доверять Sonnet, какие требуют Opus.
+5. **`tickets/P0-profiling-checkpoint.md`** — обязательный чекпоинт между Волной 1 (MVP) и
+   Волной 2 (opt-оптимизации), не пропускать.
+
+Для архитектурного обоснования "почему так" (не обязательно для выполнения одного
+тикета) — `ARCHITECTURE.md` и `PERFORMANCE_MATH.md`.
+
+## Структура репозитория
 
 ```
-
-├── README.md                          — этот файл
-├── PERFORMANCE_MATH.md                — математика холодного старта / steady-state (справочно)
-├── notes_voxy_analysis.md             — разбор прототипа Voxy, с которого начался проект
-├── exceptional-vision-vs-ev.md   — сравнительный анализ независимой реализации
-└── tickets/                           — 44 файла: рабочий план реализации
-    ├── MVP_INDEX.md                   — ⭐ ГЛАВНЫЙ навигатор, используй его
-    ├── MODEL_ASSIGNMENT.md            — разметка сложности тикетов по уровню модели
-    ├── P0-profiling-checkpoint.md     — чекпоинт профилирования между волнами
-    ├── 00-project-skeleton.md         — Волна 1 (MVP): скелет Gradle-проекта
-    ├── 01-05-api-*.md                 — Волна 1: чистые контракты ev-api
-    ├── 06-07-storage-*.md             — Волна 1: палитровый кодек, версионирование схемы
-    ├── 08-storage-section-cache-mvp.md    — Волна 1: простой кэш
-    ├── 08-storage-section-cache-opt.md    — Волна 2: шардированный кэш (opt-in)
-    ├── 09-storage-heightmap-coarse-gen.md — единая версия (не разделена на mvp/opt)
-    ├── 10-13-meshing-*.md              — Волна 1: конвейер мешинга
-    ├── 14-meshing-priority-function.md — единая версия (screen-space error + приоритет)
-    ├── 15-meshing-priority-queue-mvp.md      — Волна 1: простая очередь
-    ├── 15-meshing-work-stealing-queue-opt.md — Волна 2: lock-free work-stealing (opt-in)
-    ├── 16-meshing-mipgen-mvp.md              — Волна 1: скалярная агрегация
-    ├── 16-meshing-simd-mipgen-opt.md         — Волна 2: SIMD Vector API (opt-in)
-    ├── 17-18-gpu-backend-gl-*.md       — Волна 1: GL буферы и шейдеры
-    ├── 19-gpu-upload-batching-opt.md   — Волна 2: батч-upload (opt-in)
-    ├── 20-gpu-node-buffer-mvp.md       — Волна 1: AoS node buffer
-    ├── 20-gpu-node-buffer-soa-opt.md   — Волна 2: SoA layout (opt-in)
-    ├── 21-gpu-simple-traversal-mvp.md              — Волна 1: CPU-side traversal
-    ├── 21-gpu-persistent-traversal-shader-opt.md   — Волна 2: GPU persistent-kernel (opt-in)
-    ├── 22-gpu-hiz-occlusion-opt.md     — Волна 2: Hi-Z occlusion (opt-in, в MVP отсутствует)
-    ├── 23-gpu-indirect-multidraw-opt.md — Волна 2: indirect multi-draw (opt-in)
-    ├── 24-render-frame-graph.md        — единая версия (FrameGraph)
-    ├── 25-render-temporal-reprojection-opt.md — Волна 2: temporal coherence (opt-in)
-    ├── 26-render-dirty-tracking-mvp.md      — Волна 1: whole-section rebuild + dedup
-    ├── 26-render-dirty-subregion-opt.md     — Волна 2: sub-region granular (opt-in)
-    ├── 27-30-neoforge-*.md              — Волна 1: entrypoint, конфиг, команды, тесты
-    ├── 31-integration-checklist-mvp.md  — интеграция ПОСЛЕ Волны 1
-    ├── 31-integration-checklist-full.md — интеграция ПОСЛЕ применения opt-тикетов
-    └── 32-project-index.md              — создание и ведение PROJECT_INDEX.md
+├── README.md                — этот файл, первичная ориентация
+├── EV_SESSION_PROMPT.md      — системный промпт для сессии "один тикет"
+├── ARCHITECTURE.md           — архитектурное обоснование дизайна (справочно)
+├── PERFORMANCE_MATH.md       — математика холодного старта / steady-state (справочно)
+├── PROJECT_INDEX.md          — ⭐ текущее состояние кода, обновляется после каждого тикета
+├── PROGRESS.md               — история решений, найденных багов, ход работы по ACTION_PLAN.md
+├── ACTION_PLAN.md            — последовательность выполнения тикетов
+├── build.gradle.kts, settings.gradle.kts, gradle.properties, gradlew* — корневой Gradle-билд
+├── ev-api/       — контракты (интерфейсы/records), без реализаций. Ничего не знает о GL.
+├── ev-storage/   — хранилище секций: палитровый кодек, версионирование схемы, кэш секций.
+├── ev-meshing/   — конвейер мешинга (пока только Gradle-скелет, кода нет).
+├── ev-gpu/       — единственный модуль с LWJGL/OpenGL. Пока только Gradle-скелет.
+├── ev-render/    — FrameGraph, dirty-tracking, temporal reprojection. Пока Gradle-скелет.
+├── ev-neoforge/  — точка входа мода (entrypoint), конфиг, команды. Минимальный EV.java есть.
+├── ev-test/      — тестовые фейки (FakeRenderBackend и т.п.). Пока Gradle-скелет.
+└── tickets/      — 44 файла: рабочий план реализации по подсистемам
+    ├── MVP_INDEX.md, MODEL_ASSIGNMENT.md, P0-profiling-checkpoint.md — навигация/чекпоинт
+    └── 00…32-*.md — тикеты; суффикс `-mvp`/`-opt` = волна, без суффикса = единая версия
 ```
+
+Точный статус каждого тикета и модуля — в `PROJECT_INDEX.md`, здесь не дублируется.
 
 ## Порядок работы
 
