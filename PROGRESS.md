@@ -31,7 +31,7 @@
 ### Этап 3: Волна 1 (MVP) — GPU, Рендеринг и Интеграция
 - [x] **17-gpu-backend-gl-buffers** — GL буферы
 - [x] **18-gpu-backend-gl-shaders** — GLSL шейдеры
-- [ ] **20-gpu-node-buffer-mvp** — MVP AoS node buffer
+- [x] **20-gpu-node-buffer-mvp** — MVP AoS node buffer
 - [ ] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
 - [ ] **24-render-frame-graph** — FrameGraph
 - [ ] **26-render-dirty-tracking-mvp** — MVP dirty tracking
@@ -1209,3 +1209,16 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 
 Файлы изменены: `ev-gpu/src/main/java/dev/ev/gpu/gl/GLGraphicsPipeline.java`,
 `PROJECT_INDEX.md`, `PROGRESS.md` (эта запись).
+
+## Тикет 20-mvp — AoS Node Buffer Layout (2026-08-17, отдельная сессия)
+
+Реализована MVP (Array-of-Structures, AoS) версия буфера узлов секций на GPU (единый `BufferUsage.STORAGE` буфер размером `nodeCapacity * 32` байт). Opt-версия (`20-gpu-node-buffer-soa-opt.md`, SoA раскладка на 5 буферов) оставлена в банке гипотез до чекпоинта профилирования `P0-profiling-checkpoint.md`.
+
+- `NodeBuffer` (`dev.ev.gpu.nodes.NodeBuffer`) — класс Java. Оборачивает единственный `GpuBuffer` размером `nodeCapacity * BYTES_PER_NODE` (32 байта). Метод `close()` выдерживает идемпотентное освобождение буфера.
+- Javadoc класса содержит явное документирование MVP-статуса, предупреждение о несовместимости контракта публичного API с будущим SoA (`20-opt`), а также пояснение отсутствия поля `childMask` (так как в MVP traversal делается на CPU).
+- `node_buffer_aos.glsl` (`ev-gpu/src/main/resources/shaders/include/node_buffer_aos.glsl`) — шейдерный include-файл с объявлением структуры `Node` (vec4 bounds, uint flags, uint materialRef, uint streamState, uint _padding) и буфера `NodeBufferAoS`. Явно выдержано выравнивание по правилам `std430` (32 байта на элемент, кратно 16 для `vec4`).
+- Юнит-тесты: `NodeBufferTest` (проверка арифметики емкости и размера, проверка вызова `free()` ровно один раз через `close()`, проверка валидации аргументов конструктора).
+
+Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии из-за ограничений среды.
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
