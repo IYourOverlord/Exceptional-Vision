@@ -36,7 +36,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 13-meshing-meshlet-pack-stage | DONE | `MeshletPackStage.process(SectionPos, List<MaterialBin>) -> MeshletBatch` — финальная (четвёртая) стадия конвейера мешинга, `dev.ev.meshing.stage`. Разбивает каждый `MaterialBin` на чанки по `MAX_QUADS_PER_MESHLET=128` (последний — остаток), порядок бинов и порядок quad'ов внутри бина сохранён. `quadWorldBounds(Quad) -> float[6]` — единственное место, где считается bounding box quad'а; **явно использует ту же таблицу нормаль/width/height, что и `GreedyMeshStage` (тикет 11, требование 4a)** — не переизобретает конвенцию, Javadoc содержит прямую копию таблицы с явной пометкой источника. Пустой список бинов → `MeshletBatch` с пустым списком meshlet'ов, не исключение. Тесты: `MeshletPackStageTest` (6 сценариев: пустой вход, один бин под лимитом → 1 meshlet, бин `128*2+10` quad'ов → ровно 3 meshlet'а с сохранённым порядком, bounding box одиночного quad'а для +X/+Y/+Z с вручную посчитанными диапазонами, bounding box для нескольких разбросанных quad'ов — union по всем, не только первый/последний, `totalQuadCount()` равен сумме размеров бинов). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 14-meshing-priority-function | DONE | `dev.ev.meshing.priority`: `ScreenSpaceErrorMetric` (`computeProjectionScale`, `projectedErrorPx`, `selectLodLevel` — линейный перебор 7 уровней 6→0, `voxelSizeAtLevel=1<<level` без лишних аллокаций) и `MeshPriority` (`compute(int,...)`, `compute(SectionPos,...)`, `computeWithNearTierCheck(...)`). Битовая упаковка нормального тира: биты 60-62 lodWeight (0-7, масштабировано от `lodLevel/maxLodLevel`), 58-59 attemptWeight (capped на 3), 57 facingBonus, 0-56 insertionSeq — бит 63 всегда чист. **Двухъярусный near-player приоритет** реализован по эмпирическому уроку из текста тикета: near-tier результат = `Long.MIN_VALUE + offset` (offset = 20 бит квантованной squared-distance + 12 бит insertionSeq, максимум `0xFFFFFFFF` — арифметически безопасно относительно `Long.MIN_VALUE`), гарантированно отрицателен и потому всегда меньше (=приоритетнее) любого нормального результата под стандартным `Long`-сравнением; радиус проверяется в level-0 section-grid единицах (Chebyshev) независимо от LOD-уровня самой секции, как того требует тикет. Тесты: `ScreenSpaceErrorMetricTest` (6 сценариев) и `MeshPriorityTest` (9 сценариев, включая white-box проверку инварианта бита 63 на случайных данных с фиксированным seed и прямую проверку арифметической безопасности near-tier offset'а). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 15-meshing-priority-queue (mvp/opt) | MVP DONE, opt not applied | `MeshTaskQueue<T>` (`dev.ev.meshing.queue`) — MVP (PriorityBlockingQueue) version active, opt-версия (Chase-Lev work-stealing, `15-meshing-work-stealing-queue-opt.md`) в банке, не применена. Single shared `PriorityBlockingQueue<Entry<T>>`, no per-worker sharding. `submit(priority, task)`/`poll()` (blocking, via `take()`)/`pollNonBlocking()` (via JDK's own non-blocking `poll()`)/`size()`. Queue-depth metric (`MetricsRegistry.recordQueueDepth("mesh-task-queue", size())`) reported periodically (every 64 ops via an `AtomicInteger` counter), not on every call, per requirement 4. Near-tier priorities (negative `long`, sign bit set, per ticket 14) naturally outrank normal-tier (non-negative `long`) via plain `Long.compare` in `Entry.compareTo` — no special-casing needed in this MVP, unlike the opt version's bucket-index XOR extraction. Тесты: `MeshTaskQueueTest` (6 сценариев: ordering by priority, pollNonBlocking on empty returns null, size tracking, concurrent multi-producer/multi-consumer smoke test with no lost elements, equal-priority tasks both retrievable, near-tier vs normal-tier ordering invariant). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
-| 16-meshing-mipgen (mvp/opt) | NOT_STARTED | |
+| 16-meshing-mipgen (mvp/opt) | MVP DONE, opt not applied | `MipAggregator` (`dev.ev.meshing.mip`) — MVP (скалярная) версия активна, SIMD opt-версия (`16-meshing-simd-mipgen-opt.md`) в банке, не применена. `aggregateMajorityVote(int[] childPalette, int[] parentPalette, int parentCount)` — для каждого из `parentCount` родителей считает majority-vote среди 8 детей прямым попарным подсчётом O(8*8)=O(64) без аллокации `HashMap` на вызов. Tie-break при равенстве count: побеждает значение с наименьшим индексом позиции среди 8 детей (первое из значений, достигших максимального count при проходе позиций 0..7 по порядку) — задокументировано как обязательное для согласованности с будущей `16-opt`. `parentCount = 0` — no-op, не бросает исключение, не пишет в `parentPalette`. Тесты: `MipAggregatorTest` (5 сценариев: все 8 детей одинаковы, явное большинство 5/8, все 8 разных значений — проверка tie-break правила, 1000 родителей со случайными (fixed seed) детьми — сверка с отдельной reference-реализацией внутри теста, `parentCount=0` не трогает `parentPalette`). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 17-gpu-backend-gl-buffers | NOT_STARTED | |
 | 18-gpu-backend-gl-shaders | NOT_STARTED | |
 | 19-gpu-upload-batching-opt | NOT_STARTED | |
@@ -59,12 +59,12 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | Подсистема | Активная версия | Тикет | Дата/повод перехода (если opt) |
 |---|---|---|---|
 | Кэш секций | нет (не реализовано) | — | — |
-| Очередь мешинга | нет (не реализовано) | — | — |
+| Очередь мешинга | MVP (PriorityBlockingQueue) | 15-meshing-priority-queue-mvp | — |
 | Node buffer | нет (не реализовано) | — | — |
 | Traversal | нет (не реализовано) | — | — |
 | Occlusion culling | нет (MVP не имеет) | — | — |
 | Temporal coherence | нет (MVP не имеет) | — | — |
-| Mip-агрегация | нет (не реализовано) | — | — |
+| Mip-агрегация | MVP (скалярная) | 16-meshing-mipgen-mvp | — |
 | GPU upload | нет (не реализовано) | — | — |
 | Draw calls | нет (не реализовано) | — | — |
 | Dirty tracking | нет (не реализовано) | — | — |
@@ -76,7 +76,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
-| ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. Mip-агрегация (16) ещё не реализована. |
+| ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue`, `dev.ev.meshing.mip` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. `MipAggregator` (16) — MVP (скалярная) агрегация mip-уровней активна. |
 | ev-gpu | — | Пусто. |
 | ev-render | — | Пусто. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
@@ -329,6 +329,26 @@ traversal, если обнаружится нехватка) — сознате�
   `ev-meshing/src/test/.../queue`, аналог одноимённой заглушки в `ev-storage`, не переиспользуется
   напрямую между модулями, так как в исходной `ev-storage`-версии класс package-private).
 
+### ev-meshing — `dev.ev.meshing.mip` (тикет 16-mvp)
+- `MipAggregator` — MVP скалярная агрегация детских вокселей в родительский mip-уровень,
+  `aggregateMajorityVote(int[] childPalette, int[] parentPalette, int parentCount)`. Для
+  каждого родителя `i` в `[0, parentCount)` берёт 8 значений `childPalette[i*8..i*8+7]`
+  (порядок child index 0..7 совпадает с конвенцией `SectionPos.child(childIndex)` из тикета
+  01) и выбирает majority-vote значение прямым попарным подсчётом `O(8*8)=O(64)` без
+  аллокации `HashMap` на вызов (требование 2 тикета — минимизация GC-давления даже в MVP).
+  **Tie-break правило (зафиксировано как обязательное и идентичное между `16-mvp` и будущей
+  `16-opt`)**: при равенстве максимального count побеждает значение с наименьшим индексом
+  позиции среди 8 детей — реализовано естественно через строгое `count > bestCount` (не
+  `>=`), так что более поздняя позиция с равным (не большим) count никогда не вытесняет уже
+  найденного победителя. `parentCount = 0` — no-op, не бросает исключение и не трогает
+  `parentPalette` за пределами уже записанных индексов.
+  Файл: `ev-meshing/src/main/java/dev/ev/meshing/mip/MipAggregator.java`.
+  Тесты: `MipAggregatorTest` (5 сценариев: все 8 детей одинаковы, явное большинство 5/8, все
+  8 разных значений — проверка конкретно tie-break правила, 1000 родителей со случайными
+  (fixed seed) детьми сверенные с отдельной reference-реализацией, написанной иначе
+  (частотный массив по значению вместо попарного подсчёта) прямо внутри теста — метод не
+  проверяется сам через себя, `parentCount=0` не изменяет предзаполненный `parentPalette`).
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -390,8 +410,9 @@ traversal, если обнаружится нехватка) — сознате�
   из тикета 03, оркестрирующий вызов всех четырёх стадий подряд) **пока нет** — см. заметку
   в разделе "Ключевые классы" (`dev.ev.api.meshing`, тикет 03) выше. Очередь задач мешинга
   MVP (тикет 15-mvp, `MeshTaskQueue`, использующая `MeshPriority` из тикета 14 для сортировки)
-  реализована; opt-версия (work-stealing, 15-opt) в банке, не применена. Mip-агрегация (16),
-  GPU-бэкенд и рендер-оркестрация тоже ещё не реализованы.
+  реализована; opt-версия (work-stealing, 15-opt) в банке, не применена. Mip-агрегация MVP
+  (тикет 16-mvp, `MipAggregator`, скалярный majority-vote) реализована; SIMD opt-версия
+  (16-opt) в банке, не применена. GPU-бэкенд и рендер-оркестрация тоже ещё не реализованы.
 - **✅ Исправлено (2026-08-16, отдельная сессия по итогам реального `./gradlew build` пользователя)**:
   `ev-storage/build.gradle.kts` создан. Симптом на реальном билде совпал с тем, что было
   предсказано здесь заранее: `:ev-storage:compileJava FAILED`, 32 ошибки, все одного корня —
