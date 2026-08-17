@@ -35,7 +35,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 12-meshing-material-bin-stage | DONE | `MaterialBin(int materialId, List<Quad> quads)` (record) + `MaterialBinStage.process(List<Quad>) -> List<MaterialBin>` — третья стадия конвейера мешинга, `dev.ev.meshing.stage`. `groupBy(Quad::materialId)` через `LinkedHashMap` (стабильный порядок quad'ов внутри бина), бины на выходе отсортированы по `materialId` возрастанию. Сложность `O(n)` группировка + `O(k log k)` сортировка бинов (k = число уникальных материалов), как предпочтено требованием 3 тикета. Пустой вход → пустой список (не список из одного пустого бина). Тесты: `MaterialBinStageTest` (4 сценария из тикета: пустой вход, один материал — порядок сохранён, вперемешку 3 материала 5/2/5/8/2 → бины отсортированы 2/5/8 с сохранением относительного порядка внутри каждого, один quad → один бин). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 13-meshing-meshlet-pack-stage | DONE | `MeshletPackStage.process(SectionPos, List<MaterialBin>) -> MeshletBatch` — финальная (четвёртая) стадия конвейера мешинга, `dev.ev.meshing.stage`. Разбивает каждый `MaterialBin` на чанки по `MAX_QUADS_PER_MESHLET=128` (последний — остаток), порядок бинов и порядок quad'ов внутри бина сохранён. `quadWorldBounds(Quad) -> float[6]` — единственное место, где считается bounding box quad'а; **явно использует ту же таблицу нормаль/width/height, что и `GreedyMeshStage` (тикет 11, требование 4a)** — не переизобретает конвенцию, Javadoc содержит прямую копию таблицы с явной пометкой источника. Пустой список бинов → `MeshletBatch` с пустым списком meshlet'ов, не исключение. Тесты: `MeshletPackStageTest` (6 сценариев: пустой вход, один бин под лимитом → 1 meshlet, бин `128*2+10` quad'ов → ровно 3 meshlet'а с сохранённым порядком, bounding box одиночного quad'а для +X/+Y/+Z с вручную посчитанными диапазонами, bounding box для нескольких разбросанных quad'ов — union по всем, не только первый/последний, `totalQuadCount()` равен сумме размеров бинов). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 14-meshing-priority-function | DONE | `dev.ev.meshing.priority`: `ScreenSpaceErrorMetric` (`computeProjectionScale`, `projectedErrorPx`, `selectLodLevel` — линейный перебор 7 уровней 6→0, `voxelSizeAtLevel=1<<level` без лишних аллокаций) и `MeshPriority` (`compute(int,...)`, `compute(SectionPos,...)`, `computeWithNearTierCheck(...)`). Битовая упаковка нормального тира: биты 60-62 lodWeight (0-7, масштабировано от `lodLevel/maxLodLevel`), 58-59 attemptWeight (capped на 3), 57 facingBonus, 0-56 insertionSeq — бит 63 всегда чист. **Двухъярусный near-player приоритет** реализован по эмпирическому уроку из текста тикета: near-tier результат = `Long.MIN_VALUE + offset` (offset = 20 бит квантованной squared-distance + 12 бит insertionSeq, максимум `0xFFFFFFFF` — арифметически безопасно относительно `Long.MIN_VALUE`), гарантированно отрицателен и потому всегда меньше (=приоритетнее) любого нормального результата под стандартным `Long`-сравнением; радиус проверяется в level-0 section-grid единицах (Chebyshev) независимо от LOD-уровня самой секции, как того требует тикет. Тесты: `ScreenSpaceErrorMetricTest` (6 сценариев) и `MeshPriorityTest` (9 сценариев, включая white-box проверку инварианта бита 63 на случайных данных с фиксированным seed и прямую проверку арифметической безопасности near-tier offset'а). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
-| 15-meshing-priority-queue (mvp/opt) | NOT_STARTED | |
+| 15-meshing-priority-queue (mvp/opt) | MVP DONE, opt not applied | `MeshTaskQueue<T>` (`dev.ev.meshing.queue`) — MVP (PriorityBlockingQueue) version active, opt-версия (Chase-Lev work-stealing, `15-meshing-work-stealing-queue-opt.md`) в банке, не применена. Single shared `PriorityBlockingQueue<Entry<T>>`, no per-worker sharding. `submit(priority, task)`/`poll()` (blocking, via `take()`)/`pollNonBlocking()` (via JDK's own non-blocking `poll()`)/`size()`. Queue-depth metric (`MetricsRegistry.recordQueueDepth("mesh-task-queue", size())`) reported periodically (every 64 ops via an `AtomicInteger` counter), not on every call, per requirement 4. Near-tier priorities (negative `long`, sign bit set, per ticket 14) naturally outrank normal-tier (non-negative `long`) via plain `Long.compare` in `Entry.compareTo` — no special-casing needed in this MVP, unlike the opt version's bucket-index XOR extraction. Тесты: `MeshTaskQueueTest` (6 сценариев: ordering by priority, pollNonBlocking on empty returns null, size tracking, concurrent multi-producer/multi-consumer smoke test with no lost elements, equal-priority tasks both retrievable, near-tier vs normal-tier ordering invariant). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 16-meshing-mipgen (mvp/opt) | NOT_STARTED | |
 | 17-gpu-backend-gl-buffers | NOT_STARTED | |
 | 18-gpu-backend-gl-shaders | NOT_STARTED | |
@@ -76,7 +76,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
-| ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. Очередь задач мешинга (15-16) ещё не реализована. |
+| ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. Mip-агрегация (16) ещё не реализована. |
 | ev-gpu | — | Пусто. |
 | ev-render | — | Пусто. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
@@ -300,6 +300,35 @@ traversal, если обнаружится нехватка) — сознате�
   Файлы: `ev-meshing/src/main/java/dev/ev/meshing/priority/{ScreenSpaceErrorMetric,MeshPriority}.java`.
   Тесты: `ScreenSpaceErrorMetricTest`, `MeshPriorityTest`.
 
+### ev-meshing — `dev.ev.meshing.queue` (тикет 15-mvp)
+- `MeshTaskQueue<T>` — MVP реализация очереди задач мешинга поверх `PriorityBlockingQueue<Entry<T>>`
+  (приватный `Entry<T>` — обёртка `(long priority, T task)`, `Comparable` по `priority`, порядок
+  через `Long.compare`). Один общий shared queue на все worker-потоки, без шардирования и без
+  work-stealing (opt-версия, `15-meshing-work-stealing-queue-opt.md`, в банке — не применена).
+  `submit(priority, task)` → `queue.put(...)`; `poll()` — блокирующий, через `queue.take()`;
+  `pollNonBlocking()` — через собственный неблокирующий `PriorityBlockingQueue.poll()` из JDK;
+  `size()` — прямой делегат.
+  **Совместимость с двухъярусной схемой тикета 14 — "бесплатная"**: near-tier приоритеты (бит 63
+  установлен → отрицательный `long`) естественно сортируются раньше normal-tier (бит 63 чист →
+  неотрицательный `long`) через стандартное знаковое сравнение `Long`, без каких-либо специальных
+  преобразований — в отличие от opt-версии, которой для того же инварианта нужен XOR при извлечении
+  bucket index (см. Javadoc тикета 14 и `15-opt`).
+  **Метрика**: `MetricsRegistry.recordQueueDepth("mesh-task-queue", size())` отправляется не на
+  каждый вызов, а раз в `METRIC_REPORT_INTERVAL=64` операции (`submit`/`poll`/`pollNonBlocking`
+  суммарно), через `AtomicInteger`-счётчик — соблюдает требование 4 тикета не заваливать
+  registry на hot path.
+  **Отличие контракта от opt-версии (задокументировано в Javadoc класса, а не только здесь)**:
+  MVP-методы `submit`/`poll`/`pollNonBlocking` не имеют параметра `workerHint` — в MVP только
+  один общий queue, а не per-worker deques этого параметра просто не с чем связать. Адаптация
+  вызывающего кода при переходе на opt-версию потребует добавления этого аргумента на каждом
+  call site, не является drop-in заменой один-в-один.
+  Файл: `ev-meshing/src/main/java/dev/ev/meshing/queue/MeshTaskQueue.java`.
+  Тесты: `MeshTaskQueueTest` (ordering, non-blocking empty-poll, size tracking, concurrent
+  multi-producer/multi-consumer no-loss smoke test, equal-priority no-loss, near-tier vs
+  normal-tier ordering invariant), `NoopMetricsRegistry` — тестовая заглушка (package-private,
+  `ev-meshing/src/test/.../queue`, аналог одноимённой заглушки в `ev-storage`, не переиспользуется
+  напрямую между модулями, так как в исходной `ev-storage`-версии класс package-private).
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -360,8 +389,9 @@ traversal, если обнаружится нехватка) — сознате�
   мешинга/screen-space error реализованы). **Реализации самого `MeshBuilder`** (интерфейс
   из тикета 03, оркестрирующий вызов всех четырёх стадий подряд) **пока нет** — см. заметку
   в разделе "Ключевые классы" (`dev.ev.api.meshing`, тикет 03) выше. Очередь задач мешинга
-  (15-16, использующая `MeshPriority` из тикета 14 для сортировки), GPU-бэкенд и
-  рендер-оркестрация тоже ещё не реализованы.
+  MVP (тикет 15-mvp, `MeshTaskQueue`, использующая `MeshPriority` из тикета 14 для сортировки)
+  реализована; opt-версия (work-stealing, 15-opt) в банке, не применена. Mip-агрегация (16),
+  GPU-бэкенд и рендер-оркестрация тоже ещё не реализованы.
 - **✅ Исправлено (2026-08-16, отдельная сессия по итогам реального `./gradlew build` пользователя)**:
   `ev-storage/build.gradle.kts` создан. Симптом на реальном билде совпал с тем, что было
   предсказано здесь заранее: `:ev-storage:compileJava FAILED`, 32 ошибки, все одного корня —
