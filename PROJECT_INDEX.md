@@ -33,7 +33,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 10-meshing-occupancy-stage | DONE | `OccupancySet` (bitset `long[512]` над 32³ гридом, `flatIndex = x+y*32+z*32*32`, тот же порядок осей, что и `PaletteCodec`/`WorldSectionHandle`), `OccupancyStage.process(WorldSectionHandle) -> OccupancySet` — первая стадия конвейера мешинга в `dev.ev.meshing.stage`. Fast-path через `WorldSectionHandle.isEmpty()` — не обходит 32768 вокселей для пустой секции. Тесты: `OccupancySetTest` (get/set по углам и произвольным координатам, isEmpty, popCount, снятие бита), `OccupancyStageTest` (fast-path проверен подсчётом вызовов `getVoxel`, sparse-секция, полностью заполненная секция). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — логика тривиальна (прямые битовые операции над `long[]`), критическая часть (индексация угловых координат, popCount, снятие бита) точечно проверена вручную вне репозитория через `java` single-file launcher, без полного дублирования класса — не требовалось ввиду простоты. Требует подтверждения `./gradlew :ev-meshing:test`.|
 | 11-meshing-greedy-mesh-stage | DONE | `GreedyMeshStage.process(WorldSectionHandle, OccupancySet, MeshingContext) -> List<Quad>` — вторая стадия конвейера мешинга, `dev.ev.meshing.stage`. Единая параметризованная по оси реализация на все 6 направлений (не 6 копий кода): таблицы `NORMAL_AXIS`/`SIGN`/`WIDTH_AXIS`/`HEIGHT_AXIS` кодируют циклическую конвенцию width/height из требования 4a тикета (X→Y→Z→X). Face-видимость и материал берутся с вокселя-источника (не соседа), per требование 3. Fast-path на `occupancy.isEmpty()`. **Задокументирована (в Javadoc класса) конвенция для `MeshingContext.getNeighborBoundaryVoxel(faceDirection, a, b)`, которую сам текст тикетов 03/11 не фиксирует однозначно**: `a` = локальная координата по width-оси, `b` — по height-оси (та же циклическая конвенция) — см. "Межмодульные контракты" ниже, это будет важно для реализации `MeshingContext` в `ev-render`. Тесты: `GreedyMeshStageTest` (9 сценариев: fast-path с подсчётом вызовов контекста, одиночный воксель → 6 quad'ов 1×1, сплошной блок 4×4×4 → 6 quad'ов 4×4 вместо 384 граней, два соседних вокселя разного материала не сливаются, полный слой 32×32 → один quad на сторону, граница секции через `getNeighborBoundaryVoxel` скрывает грань, и 3 отдельных теста на конвенцию width/height для +X/+Y/+Z с заведомо неквадратными областями). `FakeMeshingContext` — новая тестовая заглушка (`ev-meshing/src/test/.../stage`), по умолчанию воздух за границей и identity-материал, со счётчиками вызовов и переопределяемым `BoundaryLookup`. **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** (см. ограничения песочницы ниже) — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 12-meshing-material-bin-stage | DONE | `MaterialBin(int materialId, List<Quad> quads)` (record) + `MaterialBinStage.process(List<Quad>) -> List<MaterialBin>` — третья стадия конвейера мешинга, `dev.ev.meshing.stage`. `groupBy(Quad::materialId)` через `LinkedHashMap` (стабильный порядок quad'ов внутри бина), бины на выходе отсортированы по `materialId` возрастанию. Сложность `O(n)` группировка + `O(k log k)` сортировка бинов (k = число уникальных материалов), как предпочтено требованием 3 тикета. Пустой вход → пустой список (не список из одного пустого бина). Тесты: `MaterialBinStageTest` (4 сценария из тикета: пустой вход, один материал — порядок сохранён, вперемешку 3 материала 5/2/5/8/2 → бины отсортированы 2/5/8 с сохранением относительного порядка внутри каждого, один quad → один бин). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
-| 13-meshing-meshlet-pack-stage | NOT_STARTED | |
+| 13-meshing-meshlet-pack-stage | DONE | `MeshletPackStage.process(SectionPos, List<MaterialBin>) -> MeshletBatch` — финальная (четвёртая) стадия конвейера мешинга, `dev.ev.meshing.stage`. Разбивает каждый `MaterialBin` на чанки по `MAX_QUADS_PER_MESHLET=128` (последний — остаток), порядок бинов и порядок quad'ов внутри бина сохранён. `quadWorldBounds(Quad) -> float[6]` — единственное место, где считается bounding box quad'а; **явно использует ту же таблицу нормаль/width/height, что и `GreedyMeshStage` (тикет 11, требование 4a)** — не переизобретает конвенцию, Javadoc содержит прямую копию таблицы с явной пометкой источника. Пустой список бинов → `MeshletBatch` с пустым списком meshlet'ов, не исключение. Тесты: `MeshletPackStageTest` (6 сценариев: пустой вход, один бин под лимитом → 1 meshlet, бин `128*2+10` quad'ов → ровно 3 meshlet'а с сохранённым порядком, bounding box одиночного quad'а для +X/+Y/+Z с вручную посчитанными диапазонами, bounding box для нескольких разбросанных quad'ов — union по всем, не только первый/последний, `totalQuadCount()` равен сумме размеров бинов). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 14-meshing-priority-function | NOT_STARTED | |
 | 15-meshing-priority-queue (mvp/opt) | NOT_STARTED | |
 | 16-meshing-mipgen (mvp/opt) | NOT_STARTED | |
@@ -76,7 +76,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
-| ev-meshing | `dev.ev.meshing.stage` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11) и `MaterialBin`/`MaterialBinStage` (12) — первые три стадии конвейера Occupancy→GreedyMesh→MaterialBin→MeshletPack. Стадия 13 (meshlet-pack) ещё не реализована. |
+| ev-meshing | `dev.ev.meshing.stage` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. Приоритезация и очередь задач мешинга (14-16) ещё не реализованы. |
 | ev-gpu | — | Пусто. |
 | ev-render | — | Пусто. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
@@ -142,8 +142,15 @@ PROGRESS.md и Javadoc `VoxelStorage.markDirty`)**: сигнатура
   `MAX_QUADS_PER_MESHLET = 128`. `totalQuadCount()` суммирует по всем meshlet'ам. Тест:
   `MeshletBatchTest`.
 - `MeshBuilder` — интерфейс. `build(WorldSectionHandle, MeshingContext) -> MeshletBatch`.
-  Только контракт — CPU-side stages (occupancy/greedy-mesh/material-bin/meshlet-pack)
-  реализуются тикетами 10-13 в модуле `ev-meshing`.
+  Только контракт. Все 4 CPU-side стадии, из которых должна собираться реализация
+  (`OccupancyStage`→`GreedyMeshStage`→`MaterialBinStage`→`MeshletPackStage`, тикеты 10-13),
+  теперь реализованы как отдельные классы в `ev-meshing`, но **ни один из тикетов 10-13 не
+  реализует сам `MeshBuilder`** — оркестрирующая реализация, вызывающая все 4 стадии подряд
+  и удовлетворяющая этому интерфейсу, в явном списке тикетов 0-32 не найдена (проверено по
+  `tickets/MVP_INDEX.md`). Возможно, предполагается как часть другого тикета (например,
+  26-render-dirty-tracking-mvp, который зависит от тикетов 2 и 11) или как отдельный
+  пропущенный тикет — стоит уточнить у пользователя перед тем, как писать эту реализацию
+  по своей инициативе.
 
 ### ev-api — `dev.ev.api.gpu` (тикет 04)
 Самый важный архитектурный контракт проекта — единственная граница между доменной
@@ -251,6 +258,21 @@ traversal, если обнаружится нехватка) — сознате�
   Файлы: `ev-meshing/src/main/java/dev/ev/meshing/stage/{MaterialBin,MaterialBinStage}.java`.
   Тесты: `MaterialBinStageTest`.
 
+### ev-meshing — `dev.ev.meshing.stage` (тикет 13)
+- `MeshletPackStage.process(SectionPos, List<MaterialBin>) -> MeshletBatch` — финальная
+  стадия конвейера. Каждый `MaterialBin` разбивается на чанки по `MAX_QUADS_PER_MESHLET`
+  (128, из `MeshletBatch`), последний чанк — остаток; порядок бинов и порядок quad'ов внутри
+  бина сохраняются без перестановки.
+- `quadWorldBounds(Quad) -> float[6]` (package-private, `{minX,minY,minZ,maxX,maxY,maxZ}`) —
+  единственное место в кодовой базе, где считается пространственный охват `Quad`. Ось нормали
+  (та же, что у `faceDirection` в `GreedyMeshStage`) имеет нулевую толщину в координате самого
+  quad'а; width/height-оси используют **ту же самую** таблицу нормаль/width/height, что
+  зафиксирована в тикете 11 (требование 4a) — таблица продублирована в Javadoc с явной
+  пометкой источника, чтобы не разъехаться с `GreedyMeshStage` при будущих правках любого из
+  двух файлов.
+  Файл: `ev-meshing/src/main/java/dev/ev/meshing/stage/MeshletPackStage.java`.
+  Тесты: `MeshletPackStageTest`.
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -306,9 +328,13 @@ traversal, если обнаружится нехватка) — сознате�
   `ev-gpu`/`ev-render`, ни один новый интерфейс в `ev-api` больше не ожидается по
   плану (кроме потенциального дополнения `RenderBackend`/`CommandList` из тикета 21-opt,
   см. выше).
-- Реализация хранилища частично существует (`ev-storage`: тикеты 06-09) и мешинга (`ev-meshing`:
-  тикеты 10-12, три из четырёх стадий конвейера — occupancy, greedy-mesh и material-bin;
-  meshlet-pack, тикет 13, ещё не реализован) — GPU-бэкенда и рендер-оркестрации всё ещё нет.
+- Реализация хранилища частично существует (`ev-storage`: тикеты 06-09) и мешинга
+  (`ev-meshing`: тикеты 10-13, все четыре CPU-side стадии конвейера — occupancy, greedy-mesh,
+  material-bin, meshlet-pack — реализованы как отдельные классы). **Реализации самого
+  `MeshBuilder`** (интерфейс из тикета 03, оркестрирующий вызов всех четырёх стадий подряд)
+  **пока нет** — см. заметку в разделе "Ключевые классы" (`dev.ev.api.meshing`, тикет 03)
+  выше. Приоритезация/очередь задач мешинга (14-16), GPU-бэкенд и рендер-оркестрация тоже
+  ещё не реализованы.
 - **✅ Исправлено (2026-08-16, отдельная сессия по итогам реального `./gradlew build` пользователя)**:
   `ev-storage/build.gradle.kts` создан. Симптом на реальном билде совпал с тем, что было
   предсказано здесь заранее: `:ev-storage:compileJava FAILED`, 32 ошибки, все одного корня —
