@@ -1165,3 +1165,45 @@ GPU/JVM-тикетах. Подтверждение `./gradlew :ev-gpu:test` ос
 Перед правкой сверено дерево файлов `ev-gpu/src` с текущим текстом всех четырёх мест —
 расхождений, оставшихся от тикета 17 (предыдущей сессии), не найдено: описание тикета 17 в
 файле точно соответствовало фактическому состоянию кода на момент начала этой сессии.
+
+### Багфикс 6 — `drawIndirectCount` ссылался на несуществующие символы `GL45.GL_PARAMETER_BUFFER`/`GL45.glMultiDrawArraysIndirectCount`
+
+Компиляция `ev-gpu` падала на `GLGraphicsPipeline.java` (метод `drawIndirectCount`, добавлен
+в тикете 18): `Cannot resolve symbol 'GL_PARAMETER_BUFFER'`, `Cannot resolve method
+'glMultiDrawArraysIndirectCount' in 'GL45'`.
+
+Причина: оба символа принадлежат расширению `ARB_indirect_parameters`, которое стало core
+только в OpenGL 4.6 (`GL46`/`GL46C`); в core-классе `GL45` (LWJGL) их нет. Проект намеренно
+зафиксирован на `GL45` ради совместимости с macOS (аппаратный потолок OpenGL 4.1, см. запись
+по тикету 17) — перейти на `GL46` нельзя. Правильный путь — тот же функционал через
+ARB-суффиксные символы: `ARBIndirectParameters.GL_PARAMETER_BUFFER_ARB` и
+`ARBIndirectParameters.glMultiDrawArraysIndirectCountARB(mode, indirect, drawcount,
+maxdrawcount, stride)`.
+
+Исправление: `GLGraphicsPipeline.java` — добавлен импорт `org.lwjgl.opengl.ARBIndirectParameters`,
+вызов `glBindBuffer` переведён на `ARBIndirectParameters.GL_PARAMETER_BUFFER_ARB`, вызов
+`glMultiDrawArraysIndirectCount` заменён на `ARBIndirectParameters.glMultiDrawArraysIndirectCountARB`
+с теми же аргументами (сигнатура ARB-версии идентична по порядку параметров). Дополнительная
+Gradle-зависимость не потребовалась — `ARBIndirectParameters`, как и `GL45`, входит в тот же
+artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle.kts`; проверено через `find`
+по `~/.m2`/содержимому jar не проводилось (сессия без доступа к Maven), вывод сделан по
+документации LWJGL — если Gradle-билд следующей сессии всё же не найдёт класс, это будет
+первое, что нужно перепроверить.
+
+`drawIndirect` (без Count) не затронут — использует `GL45.glMultiDrawArraysIndirect`, который
+существует в core GL45, ошибки там не было.
+
+Компиляция не прогнана реальным Gradle-билдом в этой сессии — то же ограничение песочницы,
+что и во всех предыдущих GPU-тикетах.
+
+`PROJECT_INDEX.md` обновлён за один проход в обоих местах, где тикет 18 описывает
+`drawIndirect`/`drawIndirectCount` (таблица "Статус тикетов" и раздел "Ключевые классы" —
+`ev-gpu`, тикеты 17-18): заменено упоминание `GL45.glMultiDrawArraysIndirectCount`/
+`GL45.GL_PARAMETER_BUFFER` на ARB-суффиксные символы, с явной пометкой "исправлено
+пост-фактум" и кратким описанием причины, вместо тихой правки задним числом. Перед правкой
+сверено дерево файлов `ev-gpu/src` — новых файлов нет, изменён только `GLGraphicsPipeline.java`,
+расхождений в остальных разделах (модульная карта, "Чего пока не существует"), не связанных
+с этой конкретной функцией, не найдено.
+
+Файлы изменены: `ev-gpu/src/main/java/dev/ev/gpu/gl/GLGraphicsPipeline.java`,
+`PROJECT_INDEX.md`, `PROGRESS.md` (эта запись).

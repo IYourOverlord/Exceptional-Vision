@@ -6,6 +6,7 @@ import dev.ev.api.gpu.GraphicsPipeline;
 import dev.ev.api.gpu.PipelineLayout;
 
 import org.lwjgl.opengl.GL45;
+import org.lwjgl.opengl.ARBIndirectParameters;
 
 import java.util.Map;
 
@@ -45,8 +46,8 @@ public final class GLGraphicsPipeline implements GraphicsPipeline {
                                    long countOffsetBytes, int maxDrawCount) {
         GL45.glUseProgram(programHandle);
         GL45.glBindBuffer(GL45.GL_DRAW_INDIRECT_BUFFER, ((GLBuffer) indirectBuffer).handle());
-        GL45.glBindBuffer(GL45.GL_PARAMETER_BUFFER, ((GLBuffer) countBuffer).handle());
-        GL45.glMultiDrawArraysIndirectCount(GL45.GL_TRIANGLES, offsetBytes, countOffsetBytes,
+        GL45.glBindBuffer(ARBIndirectParameters.GL_PARAMETER_BUFFER_ARB, ((GLBuffer) countBuffer).handle());
+        ARBIndirectParameters.glMultiDrawArraysIndirectCountARB(GL45.GL_TRIANGLES, offsetBytes, countOffsetBytes,
             maxDrawCount, 0);
     }
 
