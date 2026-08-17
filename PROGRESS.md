@@ -36,7 +36,7 @@
 - [x] **24-render-frame-graph** — FrameGraph
 - [x] **26-render-dirty-tracking-mvp** — MVP dirty tracking
 - [x] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
-- [ ] **28-neoforge-config** — Конфигурация мода
+- [x] **28-neoforge-config** — Конфигурация мода
 - [ ] **29-neoforge-commands** — Команды управления
 - [ ] **30-test-fake-render-backend** — FakeRenderBackend тесты
 - [ ] **31-integration-checklist-mvp** — Сборка и проверка MVP
@@ -1296,3 +1296,12 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 ### Багфикс 10 — Добавление тестовых зависимостей JUnit в `ev-neoforge/build.gradle.kts` (2026-08-17)
 
 При компиляции `ev-neoforge:compileTestJava` возникла ошибка `package org.junit.jupiter.api does not exist`. В `ev-neoforge/build.gradle.kts` отсутствовали конфигурации `testImplementation` для JUnit. Добавлены `junit-bom` и `junit-jupiter`.
+
+## Тикет 28 — EVConfig (конфигурация мода) (2026-08-17, отдельная сессия)
+
+Реализована система конфигурации мода (`dev.ev.neoforge.config`):
+- `EVConfig` (`dev.ev.neoforge.config.EVConfig`) — immutable `record` со всеми опциями подсистем (дистанция прорисовки, VRAM бюджет, screen-space error порог, пороги temporal coherence для Волны-2, число worker-потоков, флаг debug оверлея). Реализует метод `validated()` для неразрушающего клэмпинга/коррекции параметров при их выходе за разумные допустимые пределы.
+- `EVConfigLoader` (`dev.ev.neoforge.config.EVConfigLoader`) — связывает `EVConfig` с системой `ModConfigSpec` NeoForge 1.21.1 и регистрирует клиенский конфиг TOML (`ModConfig.Type.CLIENT`) через `ModContainer.registerConfig`.
+- Юнит-тесты: `EVConfigTest` (5 сценариев: валидность дефолтных значений, клэмпинг отрицательной рендер-дистанции, количества потоков 0, отрицательного SSE, и идемпотентность `validated()`).
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.

@@ -28,8 +28,10 @@ public final class EV {
 
     private EVInstance instance;
 
-    public EV(IEventBus modBus) {
+    public EV(IEventBus modBus, net.neoforged.fml.ModContainer container) {
         LOGGER.info("EV mod initializing (Loader: NeoForge 1.21.1)");
+
+        dev.ev.neoforge.config.EVConfigLoader.register(container);
 
         modBus.addListener(this::onClientSetup);
 
