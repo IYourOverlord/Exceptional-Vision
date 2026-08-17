@@ -442,6 +442,12 @@ traversal, если обнаружится нехватка) — сознате�
   фактическим прогоном пользователем (2026-08-17, `./gradlew build` — `BUILD SUCCESSFUL`,
   включая `ev-gpu:compileJava`/`test`/`check`/`build`)**.
 
+### ev-render — `dev.ev.render.culling`, `dev.ev.render.framegraph` (тикеты 21-mvp, 24)
+- `FrustumTester` (`dev.ev.render.culling`) — математический сферно-плоскостной тест видимости (sphere-vs-6-planes). Метод `isVisible(worldX, worldY, worldZ, radius)` делает консервативную проверку (`signedDistance < -radius` -> reject).
+- `SimpleTraversal` (`dev.ev.render.culling`) — MVP (Волна-1) CPU-side проход линейной сложности `O(N)` по списку `loadedSections`. Замеряет wall-clock время каждого вызова в наносекундах и записывает метрику `MetricsRegistry.recordGpuPassDuration("cpu-traversal", nanos)`.
+- `FrameResource` / `FramePass` / `PassBuilder` / `FrameGraphBuilder` (`dev.ev.render.framegraph`, тикет 24) — декларативная оркестрация кадра. Использование: single-use per frame instance (`execute()` можно вызвать строго один раз). Топологическая сортировка (алгоритм Кана по читаемым/пишимым ресурсам), проверка циклов (`IllegalStateException`), вставка барьеров памяти `BarrierScope.ALL` перед проходом `P`, если какой-либо ранний проход `Q` писал в ресурс, используемый `P`. Единая отправка через `RenderBackend.submit(CommandList)` за кадр и замер времени через `MetricsRegistry.recordGpuPassDuration`.
+  Тесты: `FrameGraphBuilderTest` (6 сценариев, включая циклы, независимые проходы, и промежуточные проходы).
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут

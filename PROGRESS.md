@@ -33,7 +33,7 @@
 - [x] **18-gpu-backend-gl-shaders** — GLSL шейдеры
 - [x] **20-gpu-node-buffer-mvp** — MVP AoS node buffer
 - [x] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
-- [ ] **24-render-frame-graph** — FrameGraph
+- [x] **24-render-frame-graph** — FrameGraph
 - [ ] **26-render-dirty-tracking-mvp** — MVP dirty tracking
 - [ ] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
 - [ ] **28-neoforge-config** — Конфигурация мода
@@ -1231,6 +1231,22 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 - `SimpleTraversal` (`dev.ev.render.culling.SimpleTraversal`) — выполняет обход списка `loadedSections`, фильтрует через `FrustumTester` и в обязательном порядке хронометрирует вызов в wall-clock наносекундах через `MetricsRegistry.recordGpuPassDuration("cpu-traversal", nanos)`.
 - Ни один из классов не импортирует `org.lwjgl.*` (соблюдено архитектурное разделение модулей).
 - Юнит-тесты: `FrustumTesterTest` (4 теста: сфера в центре, за пределами, частично пересекающая, и граничный случай на поверхности с радиусом 0) и `SimpleTraversalTest` (5 тестов: пустой список, все видимы, ни одна не видима, смешанный случай, и обязательная проверка вызова метрик `recordGpuPassDuration`).
+
+Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии из-за ограничений среды.
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+## Тикет 24 — FrameGraphBuilder (декларативная оркестрация кадра) (2026-08-17, отдельная сессия)
+
+Реализована декларативная оркестрация GPU-проходов кадра (`dev.ev.render.framegraph`).
+
+- `FrameResource` (`dev.ev.render.framegraph.FrameResource`) — маркер логических ресурсов между проходами.
+- `FramePass` (`dev.ev.render.framegraph.FramePass`) — интерфейс отдельного GPU-прохода кадра (`record(CommandList)`, `name()`).
+- `PassBuilder` (`dev.ev.render.framegraph.PassBuilder`) — fluent-интерфейс объявления зависимостей `reads(...)` / `writes(...)`.
+- `FrameGraphBuilder` (`dev.ev.render.framegraph.FrameGraphBuilder`) — строит граф зависимостей, выполняет топологическую сортировку (алгоритм Кана по читаемым/пишимым `FrameResource`), находит циклы (`IllegalStateException`), вставляет консервативные барьеры памяти `BarrierScope.ALL` непосредственно перед записью прохода `P`, если какой-либо из ранее исполненных проходов `Q` писал в ресурс, используемый `P`. Отправляет все команды через `RenderBackend.submit(CommandList)` за один вызов на кадр.
+- Принята модель использования **single-use per frame instance**: builder создаётся заново каждый кадр, вызов `execute()` допускается строго один раз (повторный `execute()` или `addPass()` кидает `IllegalStateException`).
+- Ни один класс не импортирует `org.lwjgl.*` (работа с GPU идет строго через `dev.ev.api.gpu.*`).
+- Юнит-тесты: `FrameGraphBuilderTest` (6 сценариев: A->B цепочка с барьером, независимые проходы без барьера, цепочка из 3 проходов, обнаружение цикла, промежуточный несвязанный проход B между A и C, несколько писателей в один потребитель, проверка падения при повторном вызове `execute()`).
 
 Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии из-за ограничений среды.
 
