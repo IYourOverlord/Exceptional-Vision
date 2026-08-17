@@ -50,7 +50,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 27-neoforge-mod-entrypoint | DONE | `dev.ev.neoforge.EV` и `dev.ev.neoforge.EVInstance`. Полная интеграция с NeoForge 1.21.1: жизненный цикл мира (`LevelEvent.Load`/`Unload` с `instanceof ClientLevel` проверкой), рендер-этап (`RenderLevelStageEvent.Stage.AFTER_SOLID_BLOCKS`), client-only регистрация (`FMLEnvironment.dist == Dist.CLIENT`), гарантированное восстановление OpenGL состояния (`glUseProgram(0)`, `glBindBuffer(GL_ARRAY_BUFFER, 0)`, `glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0)`, `glDepthMask(true)`, `glEnable(GL_DEPTH_TEST)`), расчёт nearCutoffBlocks с учётом `Math.sqrt(2.0)` для покрытия углов квадратной зоны загрузки ваниллы. |
 | 28-neoforge-config | DONE | `dev.ev.neoforge.config.EVConfig` (immutable record, диапазоны валидации/clamping в `validated()`) и `dev.ev.neoforge.config.EVConfigLoader` (интеграция с NeoForge `ModConfigSpec` / `ModContainer.registerConfig(ModConfig.Type.CLIENT)`). Настройки: `maxRenderDistanceBlocks` (4096), `vramBudgetBytes` (0=auto), `screenSpaceErrorThresholdPx` (1.5), `coherenceMaxPositionalDeltaBlocks`/`coherenceMaxAngularDeltaRadians` (зарезервированы под Волна-2 opt), `workerThreadCount` (availableProcessors/2), `enableDebugOverlay` (false). |
 | 29-neoforge-commands | DONE | `dev.ev.neoforge.command.EVCommands` (Brigadier client commands via `RegisterClientCommandsEvent`) и `MetricsSnapshotFormatter` (чистый форматтер, тестируемый без NeoForge runtime). Подкоманды: `/ev debug` (one-shot MetricsSnapshot в чат), `/ev debug watch` (toggle debug overlay flag на EVInstance, визуал — TODO), `/ev profile <passName>` (timing для named pass, MVP: только cpu-traversal), `/ev reload-config` (hot-reload EVConfig из TOML с указанием какие параметры safe/unsafe). `EVInstance` расширен: `metrics()` getter, `isDebugOverlayEnabled()`/`setDebugOverlayEnabled()` (volatile boolean на instance, без static state). `MetricsSnapshotFormatterTest` — 6 сценариев из тикета. **BUILD SUCCESSFUL, все тесты проходят.** |
-| 30-test-fake-render-backend | NOT_STARTED | |
+| 30-test-fake-render-backend | DONE | `FakeRenderBackend` (`dev.ev.test.gpu`, `ev-test/src/main/java` — placed in `main`, not `test`, so other modules can depend on `ev-test` as an ordinary test-dependency library) — fully in-memory `RenderBackend`. `FakeGpuBuffer` backed by `byte[]`; `STAGING_UPLOAD.mappedAddress()` returns a real off-heap pointer via `MemoryUtil.nmemAlloc` (chosen over throwing `UnsupportedOperationException`, per ticket's explicit callout that `StagingUploadRing` (ticket 19) may need a working `mappedAddress()` — this pointer is **not** synchronized with the `byte[]` used by `readBufferContents`/`writeBufferContents`, documented on `FakeGpuBuffer`). `FakeCommandList.newCommandList()` — test-only addition on `FakeRenderBackend` (ticket 04's `RenderBackend` contract has no method to construct a `CommandList`); `uploadToBuffer`/`copyBuffer`/`clearBuffer` really move bytes when `submit()`'d, `dispatchCompute`/`dispatchComputeIndirect`/`draw`/`memoryBarrier` only append to `recordedOperationLog()`. **Fence semantics — always immediately signaled** (synchronous execution model, no deferred GPU work to wait for): documented prominently on both `FakeRenderBackend` and `FakeFenceHandle` class Javadoc, with an explicit cross-reference to ticket 19's warning not to use this fake for fence-backpressure logic (same reasoning as ticket 19 itself already states). `activeBuffers()`/`activeTextures()` track live (non-`free()`'d) handles for leak-detection asserts. No mutable static state — fully instance-scoped. `ev-test/build.gradle.kts` updated: dependency on `ev-api` changed `implementation`→`api` (fake's public methods return `dev.ev.api.gpu.*` types, must be visible transitively to consumers of `ev-test`), added `implementation("org.lwjgl:lwjgl")` + OS-detected `runtimeOnly(...:natives-*)` (real runtime dependency now, not just `testImplementation` — `MemoryUtil.nmemAlloc` executes in `main` source set code, needs LWJGL's native library on the runtime classpath, not just Java classes; no GL/display natives needed, this is pure native-heap bookkeeping). Tests: `FakeRenderBackendTest` — all 8 scenarios from the ticket's unit-test list (buffer size/usage accessors, write→read round-trip, `free()` removes from `activeBuffers()`, `submit`+`uploadToBuffer` real byte copy via native-address write, `submit`+`copyBuffer` honoring src/dst offsets, `dispatchCompute` ordering in `recordedOperationLog()`, fence always-signaled contract, `shutdown()` idempotent/safe on double call). **Compilation/tests not run by a real Gradle/JDK build in this session** — sandbox has no `javac` (same `security.ubuntu.com` 404 on `openjdk-21-jdk-headless` as prior sessions, re-verified this session), only a JRE. Code reviewed manually line-by-line for type/signature correctness against the actual `ev-api/src/main/java/dev/ev/api/gpu/*.java` sources (not from memory) instead. Requires confirmation via `./gradlew :ev-test:test` — in particular the LWJGL natives classifier logic in `build.gradle.kts` (untested assumption, follows the common LWJGL-Gradle pattern but the exact classifier string per OS/arch combination has not been verified against a real resolve in this sandbox).|
 | 31-integration-checklist (mvp/full) | NOT_STARTED | |
 | P0-profiling-checkpoint | NOT_STARTED | |
 
@@ -79,7 +79,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue`, `dev.ev.meshing.mip` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. `MipAggregator` (16) — MVP (скалярная) агрегация mip-уровней активна. |
 | ev-gpu | `dev.ev.gpu.gl`, `dev.ev.gpu.nodes` | `GLRenderBackend` (17, 18) — `createBuffer`/`createTexture` (17) и `compilePipeline`/`compileGraphicsPipeline` (18, через `ShaderCompiler`) полностью реализованы; остальные 5 методов `RenderBackend` — заглушки на будущие тикеты (19-23). `NodeBuffer` (20-mvp) — MVP AoS раскладка GPU-буфера узлов секций (`BYTES_PER_NODE = 32`). |
 | ev-render | `dev.ev.render.culling`, `dev.ev.render.framegraph`, `dev.ev.render.dirty` | `FrustumTester` и `SimpleTraversal` (21-mvp) — culling. `FrameResource`, `FramePass`, `PassBuilder`, `FrameGraphBuilder` (24) — frame graph. `DirtySectionTracker` и `GeometryChangeDeduplicator` (26-mvp) — MVP whole-section dirty tracking с CRC32 дедупликацией геометрии. |
-| ev-test | — | Пусто, нет ни одного тестового класса. |
+| ev-test | `dev.ev.test.gpu` | `FakeRenderBackend` (30) — fully in-memory `RenderBackend` for testing domain logic without a real GPU. Lives in `main` source set so it's reusable as an ordinary test-dependency by other modules. |
 
 ## Ключевые классы
 
@@ -451,6 +451,64 @@ traversal, если обнаружится нехватка) — сознате�
 - `GeometryChangeDeduplicator` (`dev.ev.render.dirty`, тикет 26-mvp) — дедупликация пересборки геометрии по CRC32-хэшу `Quad`-списка секции, предотвращает лишние GPU upload / дисковые записи при байт-в-байт идентичном результате.
   Тесты: `DirtySectionTrackerTest` (5 сценариев), `GeometryChangeDeduplicatorTest` (4 сценария).
 
+### ev-test — `dev.ev.test.gpu` (тикет 30)
+- `FakeRenderBackend implements RenderBackend` — полностью in-memory реализация,
+  единственный класс проекта в `ev-test`. Размещён в `main` source set (`ev-test/src/main
+  /java/dev/ev/test/gpu`), а не в `test`, чтобы другие модули (`ev-gpu`, `ev-render`) могли
+  подключить его как обычную test-зависимость на `ev-test`, а не только использовать
+  внутри собственных тестов `ev-test`. **Компилирует/исполняет CommandList синхронно**
+  внутри `submit()` — нет отложенного GPU-исполнения.
+- `FakeGpuBuffer` — backed by `byte[]` (int-индексируемый, поэтому `sizeBytes >
+  Integer.MAX_VALUE` бросает `IllegalArgumentException` — задокументированное
+  fake-специфичное ограничение, не относится к реальным реализациям). Для
+  `BufferUsage.STAGING_UPLOAD` — `mappedAddress()` возвращает **реальный** off-heap адрес
+  через `MemoryUtil.nmemAlloc` (выбрано вместо простого `UnsupportedOperationException`,
+  так как тикет явно указал, что `StagingUploadRing` из тикета 19 может нуждаться в
+  рабочем `mappedAddress()` для полноценного теста без реального GL). **Важно**: этот
+  off-heap блок НЕ синхронизирован с `byte[]`, который использует
+  `readBufferContents`/`writeBufferContents`/`FakeCommandList` — запись через сырой
+  указатель не отражается в `readBufferContents` и наоборот; задокументировано на классе.
+- `FakeCommandList` (package-private) — записывает операции в список, реально исполняет
+  их только при передаче в `FakeRenderBackend.submit(...)`:
+  `uploadToBuffer`/`copyBuffer`/`clearBuffer` реально двигают байты между
+  `FakeGpuBuffer`-объектами; `dispatchCompute`/`dispatchComputeIndirect`/`draw`/
+  `memoryBarrier` только пишутся в `recordedOperationLog()`. Получение экземпляра —
+  `FakeRenderBackend.newCommandList()`, тестовое дополнение сверх контракта
+  `RenderBackend` (тикет 04 не предоставляет способа создать `CommandList`).
+- **Fence-семантика — все fence считаются сигнализированными немедленно** (`isSignaled`
+  всегда `true`, `waitForFence` возвращает `true` без блокировки) — прямое следствие
+  синхронного исполнения. Явно и заметно задокументировано и на `FakeRenderBackend`, и на
+  `FakeFenceHandle` (не только в тексте тикета) со ссылкой на предупреждение тикета
+  19-gpu-upload-batching-opt, которое уже само по себе предостерегает не использовать этот
+  fake для тестирования fence-зависимой backpressure-логики.
+- `FakeComputePipeline`/`FakeGraphicsPipeline` — не компилируют GLSL (нет GL-контекста),
+  хранят `ShaderSource`/`PipelineLayout` как есть, `dispatch`/`bindBuffer`/`bindTexture`/
+  `drawIndirect`/etc. пишут вызовы в `recordedOperationLog()` родительского backend'а через
+  package-private `FakeRenderBackend.log(String)`. `bindBuffer`/`bindTexture` валидируют
+  имя биндинга против `PipelineLayout.bindingsByName()`, бросая `IllegalArgumentException`
+  на опечатку — полезная проверка вызывающего кода, которую тикет прямо перечисляет как
+  одну из целей fake'а ("correct binding names").
+- `activeBuffers()`/`activeTextures()` — живой снимок неосвобождённых handle'ов, для
+  leak-detection assert'ов в тестах, потребляющих этот fake.
+  Файлы: `ev-test/src/main/java/dev/ev/test/gpu/{FakeRenderBackend,FakeGpuBuffer,
+  FakeGpuTexture,FakeCommandList,FakeComputePipeline,FakeGraphicsPipeline,
+  FakeFenceHandle}.java`.
+  Тесты: `FakeRenderBackendTest` (`ev-test/src/test/java/dev/ev/test/gpu`) — 8 сценариев
+  из тикета (accessors, write→read round-trip, `free()`→`activeBuffers()`, `submit`+
+  `uploadToBuffer` реальное копирование через нативный адрес, `submit`+`copyBuffer` с
+  учётом offset'ов, порядок `dispatchCompute` в логе, always-signaled fence-контракт,
+  `shutdown()` идемпотентен).
+  **⚠️ Build-файл изменён**: `ev-test/build.gradle.kts` — зависимость на `ev-api`
+  сменена `implementation`→`api` (публичные методы fake'а возвращают типы
+  `dev.ev.api.gpu.*`, должны быть видны транзитивно потребителям `ev-test`), добавлена
+  `implementation("org.lwjgl:lwjgl")` + OS-детектируемый `runtimeOnly(natives-*)`
+  (реальная runtime-зависимость теперь, не только `testImplementation` — `nmemAlloc`
+  исполняется в коде `main` source set'а, нужна нативная библиотека LWJGL на runtime
+  classpath, не только Java-классы; GL/display natives не требуются, это чистая
+  работа с off-heap памятью). **Точная классификатор-строка per OS/arch не проверена
+  реальным резолвом зависимостей в этой песочнице** — следует стандартному LWJGL-Gradle
+  паттерну, но это непроверенное допущение до реального `./gradlew` прогона.
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -538,7 +596,8 @@ traversal, если обнаружится нехватка) — сознате�
 - `neoforge.mods.toml` существует только как шаблон в `src/main/templates`
   (разворачивается таском `generateModMetadata` в `build/generated/...`), не как
   статичный файл в `resources`.
-- Конфиг мода, debug-команды (`/ev ...`), FakeRenderBackend — не существуют.
+- Конфиг мода, debug-команды (`/ev ...`) реализованы (тикеты 28-29). `FakeRenderBackend`
+  (тикет 30) теперь тоже реализован — см. раздел `ev-test` выше.
 
 ## Сборка/тесты — состояние и справочник по известным проблемам
 

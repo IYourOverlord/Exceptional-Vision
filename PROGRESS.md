@@ -38,7 +38,7 @@
 - [x] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
 - [x] **28-neoforge-config** — Конфигурация мода
 - [x] **29-neoforge-commands** — Команды управления
-- [ ] **30-test-fake-render-backend** — FakeRenderBackend тесты
+- [x] **30-test-fake-render-backend** — FakeRenderBackend тесты
 - [ ] **31-integration-checklist-mvp** — Сборка и проверка MVP
 
 ### Этап 4: Профилирование (Чекпоинт P0)
@@ -1303,5 +1303,97 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 - `EVConfig` (`dev.ev.neoforge.config.EVConfig`) — immutable `record` со всеми опциями подсистем (дистанция прорисовки, VRAM бюджет, screen-space error порог, пороги temporal coherence для Волны-2, число worker-потоков, флаг debug оверлея). Реализует метод `validated()` для неразрушающего клэмпинга/коррекции параметров при их выходе за разумные допустимые пределы.
 - `EVConfigLoader` (`dev.ev.neoforge.config.EVConfigLoader`) — связывает `EVConfig` с системой `ModConfigSpec` NeoForge 1.21.1 и регистрирует клиенский конфиг TOML (`ModConfig.Type.CLIENT`) через `ModContainer.registerConfig`.
 - Юнит-тесты: `EVConfigTest` (5 сценариев: валидность дефолтных значений, клэмпинг отрицательной рендер-дистанции, количества потоков 0, отрицательного SSE, и идемпотентность `validated()`).
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+## Тикет 30 — FakeRenderBackend (in-memory реализация RenderBackend для тестов) (2026-08-17, отдельная сессия)
+
+Реализован `dev.ev.test.gpu.FakeRenderBackend` — полностью in-memory реализация
+`RenderBackend` (тикет 04), единственный код в модуле `ev-test` на данный момент.
+
+**Ключевые решения по неоднозначным пунктам тикета:**
+
+1. **Размещение (main vs test source set)** — файлы положены в
+   `ev-test/src/main/java/dev/ev/test/gpu/`, не в `src/test`. Обоснование прямо из
+   текста тикета (критерий приёмки 1): другие модули (`ev-gpu`, `ev-render`) могут
+   захотеть импортировать `FakeRenderBackend` как test-зависимость для собственных
+   тестов, а `main` source set компилируется в обычный jar, доступный как
+   `testImplementation(project(":ev-test"))` из других модулей; `test` source set так
+   просто не шарится между Gradle-подпроектами.
+
+2. **`mappedAddress()` для `STAGING_UPLOAD`** — реализован через реальное off-heap
+   выделение (`MemoryUtil.nmemAlloc`/`nmemFree`, LWJGL), а не через
+   `UnsupportedOperationException`. Причина: тикет явно указал на `StagingUploadRing`
+   (тикет 19) как на потенциального потребителя, которому может понадобиться рабочий
+   адрес для полноценного теста без реального GL, и явно разрешил такой подход
+   (`MemoryUtil` не требует GL-контекста). **Важное следствие, задокументированное в
+   Javadoc `FakeGpuBuffer`**: этот off-heap блок — отдельная память от `byte[]`,
+   который `FakeRenderBackend`/`FakeCommandList` используют для
+   `readBufferContents`/`writeBufferContents`/копирования при `submit()`. Они НЕ
+   синхронизированы автоматически (это невозможно сделать из чистой Java без
+   перехвата нативных записей) — тест, который пишет через `mappedAddress()` напрямую,
+   должен читать обратно тоже через нативный `ByteBuffer`
+   (`MemoryUtil.memByteBuffer(address, size)`), не через `readBufferContents`.
+
+3. **Способ получить `CommandList` для записи операций до `submit`** — добавлен
+   `FakeRenderBackend.newCommandList()`, публичный метод, явно задокументированный как
+   тестовое дополнение сверх контракта `RenderBackend` (у тикета 04 в контракте нет
+   способа создать `CommandList`).
+
+4. **Fence-семантика** — все fence немедленно `isSignaled()==true`,
+   `waitForFence()` возвращает `true` без блокировки (синхронная модель исполнения
+   `submit()`). Задокументировано explicit на уровне Javadoc и `FakeRenderBackend`, и
+   отдельного класса `FakeFenceHandle` (не только здесь, в PROGRESS.md — тикет прямо
+   требовал, чтобы исполнитель другого тикета, читающий только готовый класс, увидел
+   предупреждение), со ссылкой на уже существующее предупреждение в
+   `19-gpu-upload-batching-opt.md`.
+
+**Структура классов** (`ev-test/src/main/java/dev/ev/test/gpu/`):
+`FakeRenderBackend` (public final, реализует `RenderBackend`), `FakeGpuBuffer`,
+`FakeGpuTexture`, `FakeCommandList` (package-private, использует `sealed interface Op`
+с record-вариантами для накопления операций до `executeAgainst()`),
+`FakeComputePipeline`/`FakeGraphicsPipeline` (пишут в лог родительского backend'а через
+package-private `FakeRenderBackend.log(String)`), `FakeFenceHandle`.
+
+**Build-файл**: `ev-test/build.gradle.kts` изменён — зависимость `ev-api` сменена с
+`implementation` на `api` (публичные методы `FakeRenderBackend` возвращают
+`dev.ev.api.gpu.*` типы напрямую — `createBuffer()->GpuBuffer` и т.д. — которые должны
+быть видны транзитивно потребителям `ev-test` как test-зависимости); добавлена
+`implementation("org.lwjgl:lwjgl:${lwjglVersion}")` (Java-классы `MemoryUtil` нужны в
+`main`, не только в `testImplementation`, как было раньше) и OS/arch-детектируемый
+`runtimeOnly("org.lwjgl:lwjgl:${lwjglVersion}:${lwjglNatives}")` (нативная библиотека
+LWJGL для реального исполнения `nmemAlloc`/`nmemFree` в рантайме — без неё
+`UnsatisfiedLinkError` при первом вызове; определение classifier по
+`OperatingSystem.current()`/`os.arch`, стандартный для LWJGL-Gradle проектов паттерн).
+Аналогичный `testRuntimeOnly` добавлен для тестов самого `ev-test`.
+
+**Тесты**: `FakeRenderBackendTest` (`ev-test/src/test/java/dev/ev/test/gpu/`) — все 8
+сценариев из тикета: `createBuffer` accessors, write→read round-trip, `free()` убирает
+из `activeBuffers()`, `submit`+`uploadToBuffer` реально копирует байты (проверено через
+запись в native-адрес и последующий `readBufferContents`), `submit`+`copyBuffer` с
+учётом src/dst offset'ов, порядок `dispatchCompute`-вызовов в `recordedOperationLog()`,
+always-immediately-signaled fence-контракт, `shutdown()` не бросает и идемпотентен при
+двойном вызове.
+
+**Не тронуто намеренно**: локальный package-private `FakeRenderBackend` внутри
+`NodeBufferTest.java` (`ev-gpu/src/test/java/dev/ev/gpu/nodes/`, тикет 20) — другой
+класс, в другом пакете (`dev.ev.gpu.nodes`, не `dev.ev.test.gpu`), не конфликтует по
+именам на уровне компилятора (разные полностью квалифицированные имена). Тикет 30 прямо
+разрешает не консолидировать существующие локальные заглушки в рамках этого же тикета —
+эта реализация лишь должна быть "достаточно полной и удобной", чтобы консолидация была
+возможна позже. Консолидация `NodeBufferTest` не выполнена.
+
+**Компиляция/тесты не прогнаны реальным Gradle/JDK-билдом в этой сессии** — песочница
+по-прежнему не имеет `javac` (повторно проверено: `apt-get install
+openjdk-21-jdk-headless` падает на том же 404 с `security.ubuntu.com`, что и в
+предыдущих сессиях, симптом не изменился). Код построчно сверен вручную с реальными
+исходниками `ev-api/src/main/java/dev/ev/api/gpu/*.java` (не по памяти) — все сигнатуры
+методов интерфейсов (`RenderBackend`, `CommandList`, `ComputePipeline`,
+`GraphicsPipeline`, `GpuBuffer`, `GpuTexture`) скопированы 1-в-1 из фактических файлов
+перед написанием реализующего кода. Требует подтверждения `./gradlew :ev-test:test` —
+**особое внимание к LWJGL natives classifier-логике** в `build.gradle.kts`: конкретная
+строка classifier per OS/arch не проверена реальным резолвом зависимостей Gradle в этой
+песочнице, это непроверенное допущение по аналогии с общепринятым LWJGL-Gradle
+паттерном.
 
 `PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
