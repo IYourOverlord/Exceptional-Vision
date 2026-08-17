@@ -68,6 +68,9 @@ dependencies {
     implementation(project(":ev-meshing"))
     implementation(project(":ev-gpu"))
     implementation(project(":ev-render"))
+
+    testImplementation(platform("org.junit:junit-bom:${property("junit_version")}"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
 }
 
 // Разворачивает шаблон neoforge.mods.toml (в src/main/templates) в build/generated —

@@ -35,7 +35,7 @@
 - [x] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
 - [x] **24-render-frame-graph** — FrameGraph
 - [x] **26-render-dirty-tracking-mvp** — MVP dirty tracking
-- [ ] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
+- [x] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
 - [ ] **28-neoforge-config** — Конфигурация мода
 - [ ] **29-neoforge-commands** — Команды управления
 - [ ] **30-test-fake-render-backend** — FakeRenderBackend тесты
@@ -1277,3 +1277,22 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 
 При компиляции `ev-render:compileJava` возникла ошибка `package it.unimi.dsi.fastutil.longs does not exist`. Причина: модуль `ev-render` до тикета 26 не использовал `fastutil` напрямую, в `ev-render/build.gradle.kts` отсутствовала зависимость.
 Добавлена строка `implementation("it.unimi.dsi:fastutil:${property("fastutil_version")}")` в `ev-render/build.gradle.kts`.
+
+## Тикет 27 — NeoForge Mod Entrypoint и события (2026-08-17, отдельная сессия)
+
+Реализована полноценная точки входа NeoForge мода и интеграция с игровыми событиями (`dev.ev.neoforge`):
+- `EV` (`dev.ev.neoforge.EV`) — главный класс мода (`@Mod("ev")`). Подписывается на `FMLClientSetupEvent` на modBus, и на `LevelEvent.Load`, `LevelEvent.Unload`, `RenderLevelStageEvent` на `NeoForge.EVENT_BUS` только при условии `FMLEnvironment.dist == Dist.CLIENT` для безопасности dedicated server.
+- `EVInstance` (`dev.ev.neoforge.EVInstance`) — управляет жизненным циклом одной загруженной клиентской локации. Реализует `bootstrap()` для создания `GLRenderBackend` при наличии GL контекста, и `renderFarLod(RenderLevelStageEvent)` для выполнения фазы рендеринга.
+- Гарантия совместимости Sodium / Embeddium: в `renderFarLod` метод строго очищает и восстанавливает OpenGL состояние (`glUseProgram(0)`, `glBindBuffer`, `glDepthMask(true)`, `glEnable(GL_DEPTH_TEST)`).
+- Эмпирический урок (Exceptional Vision): реализован расчёт `calculateNearCutoffBlocks` с умножением на `Math.sqrt(2.0)`, полностью покрывающий диагональ квадратной ванильной области загрузки чанков и предотвращающий клиновидные дыры по диагоналям.
+- Тесты: `EVInstanceTest` (проверка формулы `calculateNearCutoffBlocks` для различных рендер-дистанций и безопасного вызова `close()`).
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 9 — Лямбда-выражение для `FramePass` в `EVInstance` (2026-08-17)
+
+Интерфейс `FramePass` имеет два абстрактных метода (`record` и `name`) и не является функциональным интерфейсом. Выражение `cmdList -> { ... }` внутри `addPass` вызывало ошибку компиляции. Заменено на анонимный класс `new FramePass() { ... }`.
+
+### Багфикс 10 — Добавление тестовых зависимостей JUnit в `ev-neoforge/build.gradle.kts` (2026-08-17)
+
+При компиляции `ev-neoforge:compileTestJava` возникла ошибка `package org.junit.jupiter.api does not exist`. В `ev-neoforge/build.gradle.kts` отсутствовали конфигурации `testImplementation` для JUnit. Добавлены `junit-bom` и `junit-jupiter`.

@@ -47,7 +47,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 24-render-frame-graph | DONE | `dev.ev.render.framegraph.FrameGraphBuilder` — декларативный билдер графа GPU-проходов кадра. Использование: single-use per frame instance. Проводит топологическую сортировку (алгоритм Кана) по ресурсам `FrameResource`, проверяет циклы (`IllegalStateException`), вставляет консервативный memory barrier (`BarrierScope.ALL`) непосредственно перед проходом `P`, если какой-либо из предшествующих проходов `Q` писал в ресурс, читаемый или пишимый `P`. Исполняет все команды через единственный `RenderBackend.submit(CommandList)` за кадр и записывает длительность каждого прохода в `MetricsRegistry`. |
 | 25-render-temporal-reprojection-opt | NOT_STARTED | |
 | 26-render-dirty (tracking-mvp/subregion-opt) | DONE (mvp) | **Dirty tracking — MVP (whole-section) версия активна, sub-region opt-версия в банке, не применена.** `dev.ev.render.dirty.DirtySectionTracker` (отслеживание изменений на уровне всей секции целиком через `LongOpenHashSet` закодированных `SectionPos`) и `dev.ev.render.dirty.GeometryChangeDeduplicator` (дедупликация по CRC32-хэшу `Quad`-списка секции, предотвращающая лишние выгрузки на GPU/записи на диск при неизменившейся геометрии). |
-| 27-neoforge-mod-entrypoint | IN_PROGRESS | Минимальный класс `EV` создан тикетом 00 (пустой entrypoint, только лог). Полноценная реализация (события, worker pool) — предмет самого тикета 27, ещё не выполнена. |
+| 27-neoforge-mod-entrypoint | DONE | `dev.ev.neoforge.EV` и `dev.ev.neoforge.EVInstance`. Полная интеграция с NeoForge 1.21.1: жизненный цикл мира (`LevelEvent.Load`/`Unload` с `instanceof ClientLevel` проверкой), рендер-этап (`RenderLevelStageEvent.Stage.AFTER_SOLID_BLOCKS`), client-only регистрация (`FMLEnvironment.dist == Dist.CLIENT`), гарантированное восстановление OpenGL состояния (`glUseProgram(0)`, `glBindBuffer(GL_ARRAY_BUFFER, 0)`, `glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0)`, `glDepthMask(true)`, `glEnable(GL_DEPTH_TEST)`), расчёт nearCutoffBlocks с учётом `Math.sqrt(2.0)` для покрытия углов квадратной зоны загрузки ваниллы. |
 | 28-neoforge-config | NOT_STARTED | |
 | 29-neoforge-commands | NOT_STARTED | |
 | 30-test-fake-render-backend | NOT_STARTED | |
@@ -73,7 +73,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 
 | Модуль | Пакет | Назначение |
 |---|---|---|
-| ev-neoforge | `dev.ev.neoforge` | Entrypoint мода, регистрация в NeoForge. Пока только класс `EV`. |
+| ev-neoforge | `dev.ev.neoforge` | `EV` (@Mod entrypoint, подписка на `FMLClientSetupEvent`, `LevelEvent.Load`/`Unload`, `RenderLevelStageEvent`), `EVInstance` (управление GLRenderBackend, FrameGraphBuilder, рендер-хук `renderFarLod` с гарантией очистки GL-состояния и расчётом nearCutoffBlocks по sqrt(2)). |
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
 | ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue`, `dev.ev.meshing.mip` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. `MipAggregator` (16) — MVP (скалярная) агрегация mip-уровней активна. |
@@ -83,10 +83,9 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 
 ## Ключевые классы
 
-### ev-neoforge — `dev.ev.neoforge`
-- `EV` — entrypoint класса мода, аннотация `@Mod("ev")`, конструктор принимает
-  `IEventBus`. Пока не делает ничего, кроме `LOGGER.info("EV mod loaded")` через SLF4J.
-  Событий, worker pool, конфига — нет, это добавит тикет 27.
+### ev-neoforge — `dev.ev.neoforge` (тикеты 00, 27)
+- `EV` — entrypoint класс мода, аннотация `@Mod("ev")`, конструктор подписывается на `FMLClientSetupEvent` (modBus) и `LevelEvent.Load`/`Unload`/`RenderLevelStageEvent` (`NeoForge.EVENT_BUS` только на физическом клиенте `FMLEnvironment.dist == Dist.CLIENT`). Управляет экземпляром `EVInstance`.
+- `EVInstance` — жизненный цикл одного мира/рендер-контекста. `bootstrap()` создает `GLRenderBackend` при наличии GL-контекста. Метод `renderFarLod(RenderLevelStageEvent)` выполняет фар-рендеринг и строго сбрасывает GL state (`glUseProgram(0)`, `glBindBuffer`, `glDepthMask(true)`). Содержит статическую математику `calculateNearCutoffBlocks` с умножением на `Math.sqrt(2.0)` для полного закрытия углов квадратной ванильной зоны прорисовки.
 
 ### ev-api — `dev.ev.api`
 - `SectionPos(int level, int x, int y, int z)` — immutable record, позиция LOD-секции.
