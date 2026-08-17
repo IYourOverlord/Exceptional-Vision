@@ -28,12 +28,15 @@ public final class EVInstance implements AutoCloseable {
 
     private final RenderBackend backend;
     private final FrameGraphBuilder frameGraphBuilder;
+    private final dev.ev.api.metrics.MetricsRegistry metricsRegistry;
     private boolean closed = false;
+    private volatile boolean debugOverlayEnabled = false;
 
     private EVInstance(RenderBackend backend) {
         this.backend = Objects.requireNonNull(backend, "backend cannot be null");
+        this.metricsRegistry = new NoopMetricsRegistry();
         // FrameGraphBuilder in MVP takes backend and a metrics registry (or no-op placeholder if metrics unavailable)
-        this.frameGraphBuilder = new FrameGraphBuilder(backend, new NoopMetricsRegistry());
+        this.frameGraphBuilder = new FrameGraphBuilder(backend, metricsRegistry);
     }
 
     /**
@@ -45,6 +48,34 @@ public final class EVInstance implements AutoCloseable {
     public static EVInstance bootstrap() {
         GLRenderBackend backend = new GLRenderBackend();
         return new EVInstance(backend);
+    }
+
+    /**
+     * Returns the MetricsRegistry for this instance, used by /ev debug commands.
+     *
+     * @return the metrics registry (never null)
+     */
+    public dev.ev.api.metrics.MetricsRegistry metrics() {
+        return metricsRegistry;
+    }
+
+    /**
+     * Whether the debug overlay is currently enabled (toggled via /ev debug watch).
+     *
+     * @return true if debug overlay is active
+     */
+    public boolean isDebugOverlayEnabled() {
+        return debugOverlayEnabled;
+    }
+
+    /**
+     * Sets the debug overlay state. Called by /ev debug watch command.
+     * The actual overlay rendering is TODO — this flag controls data collection.
+     *
+     * @param enabled true to enable
+     */
+    public void setDebugOverlayEnabled(boolean enabled) {
+        this.debugOverlayEnabled = enabled;
     }
 
     /**

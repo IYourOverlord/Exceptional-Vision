@@ -37,7 +37,7 @@
 - [x] **26-render-dirty-tracking-mvp** — MVP dirty tracking
 - [x] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
 - [x] **28-neoforge-config** — Конфигурация мода
-- [ ] **29-neoforge-commands** — Команды управления
+- [x] **29-neoforge-commands** — Команды управления
 - [ ] **30-test-fake-render-backend** — FakeRenderBackend тесты
 - [ ] **31-integration-checklist-mvp** — Сборка и проверка MVP
 

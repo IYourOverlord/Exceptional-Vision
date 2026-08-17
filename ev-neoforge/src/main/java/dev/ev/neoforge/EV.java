@@ -6,6 +6,7 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
+import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.level.LevelEvent;
@@ -40,6 +41,7 @@ public final class EV {
             NeoForge.EVENT_BUS.addListener(this::onLevelLoad);
             NeoForge.EVENT_BUS.addListener(this::onLevelUnload);
             NeoForge.EVENT_BUS.addListener(this::onRenderLevelStage);
+            NeoForge.EVENT_BUS.addListener(this::onRegisterClientCommands);
         }
     }
 
@@ -48,6 +50,11 @@ public final class EV {
         // EVInstance.bootstrap() is deliberately deferred to onLevelLoad (or first render pass)
         // when a live GL context is guaranteed.
         LOGGER.info("EV client setup completed");
+    }
+
+    private void onRegisterClientCommands(RegisterClientCommandsEvent event) {
+        dev.ev.neoforge.command.EVCommands.register(event.getDispatcher(), () -> instance);
+        LOGGER.info("EV client commands registered");
     }
 
     private void onLevelLoad(LevelEvent.Load event) {
