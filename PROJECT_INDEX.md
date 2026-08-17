@@ -37,7 +37,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 14-meshing-priority-function | DONE | `dev.ev.meshing.priority`: `ScreenSpaceErrorMetric` (`computeProjectionScale`, `projectedErrorPx`, `selectLodLevel` — линейный перебор 7 уровней 6→0, `voxelSizeAtLevel=1<<level` без лишних аллокаций) и `MeshPriority` (`compute(int,...)`, `compute(SectionPos,...)`, `computeWithNearTierCheck(...)`). Битовая упаковка нормального тира: биты 60-62 lodWeight (0-7, масштабировано от `lodLevel/maxLodLevel`), 58-59 attemptWeight (capped на 3), 57 facingBonus, 0-56 insertionSeq — бит 63 всегда чист. **Двухъярусный near-player приоритет** реализован по эмпирическому уроку из текста тикета: near-tier результат = `Long.MIN_VALUE + offset` (offset = 20 бит квантованной squared-distance + 12 бит insertionSeq, максимум `0xFFFFFFFF` — арифметически безопасно относительно `Long.MIN_VALUE`), гарантированно отрицателен и потому всегда меньше (=приоритетнее) любого нормального результата под стандартным `Long`-сравнением; радиус проверяется в level-0 section-grid единицах (Chebyshev) независимо от LOD-уровня самой секции, как того требует тикет. Тесты: `ScreenSpaceErrorMetricTest` (6 сценариев) и `MeshPriorityTest` (9 сценариев, включая white-box проверку инварианта бита 63 на случайных данных с фиксированным seed и прямую проверку арифметической безопасности near-tier offset'а). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 15-meshing-priority-queue (mvp/opt) | MVP DONE, opt not applied | `MeshTaskQueue<T>` (`dev.ev.meshing.queue`) — MVP (PriorityBlockingQueue) version active, opt-версия (Chase-Lev work-stealing, `15-meshing-work-stealing-queue-opt.md`) в банке, не применена. Single shared `PriorityBlockingQueue<Entry<T>>`, no per-worker sharding. `submit(priority, task)`/`poll()` (blocking, via `take()`)/`pollNonBlocking()` (via JDK's own non-blocking `poll()`)/`size()`. Queue-depth metric (`MetricsRegistry.recordQueueDepth("mesh-task-queue", size())`) reported periodically (every 64 ops via an `AtomicInteger` counter), not on every call, per requirement 4. Near-tier priorities (negative `long`, sign bit set, per ticket 14) naturally outrank normal-tier (non-negative `long`) via plain `Long.compare` in `Entry.compareTo` — no special-casing needed in this MVP, unlike the opt version's bucket-index XOR extraction. Тесты: `MeshTaskQueueTest` (6 сценариев: ordering by priority, pollNonBlocking on empty returns null, size tracking, concurrent multi-producer/multi-consumer smoke test with no lost elements, equal-priority tasks both retrievable, near-tier vs normal-tier ordering invariant). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
 | 16-meshing-mipgen (mvp/opt) | MVP DONE, opt not applied | `MipAggregator` (`dev.ev.meshing.mip`) — MVP (скалярная) версия активна, SIMD opt-версия (`16-meshing-simd-mipgen-opt.md`) в банке, не применена. `aggregateMajorityVote(int[] childPalette, int[] parentPalette, int parentCount)` — для каждого из `parentCount` родителей считает majority-vote среди 8 детей прямым попарным подсчётом O(8*8)=O(64) без аллокации `HashMap` на вызов. Tie-break при равенстве count: побеждает значение с наименьшим индексом позиции среди 8 детей (первое из значений, достигших максимального count при проходе позиций 0..7 по порядку) — задокументировано как обязательное для согласованности с будущей `16-opt`. `parentCount = 0` — no-op, не бросает исключение, не пишет в `parentPalette`. Тесты: `MipAggregatorTest` (5 сценариев: все 8 детей одинаковы, явное большинство 5/8, все 8 разных значений — проверка tie-break правила, 1000 родителей со случайными (fixed seed) детьми — сверка с отдельной reference-реализацией внутри теста, `parentCount=0` не трогает `parentPalette`). **Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-meshing:test`.|
-| 17-gpu-backend-gl-buffers | NOT_STARTED | |
+| 17-gpu-backend-gl-buffers | DONE (partial — createBuffer/createTexture only) | `GLRenderBackend implements RenderBackend` (`dev.ev.gpu.gl`) — единственный модуль во всём проекте, импортирующий `org.lwjgl.*`. `createBuffer`/`createTexture` полностью реализованы через DSA-стиль вызовы (GL 4.5+): `glCreateBuffers`+`glNamedBufferStorage` (STATIC_DRAW/DYNAMIC_DRAW/STORAGE → `GL_DYNAMIC_STORAGE_BIT`; STAGING_UPLOAD → `GL_MAP_WRITE_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT` + `glMapNamedBufferRange`+`MemoryUtil.memAddress(...)` для получения `long`-адреса; STAGING_DOWNLOAD аналогично с `GL_MAP_READ_BIT`), `glCreateTextures`+`glTextureStorage2D`/`3D` (3D если `depth()>1`) с маппингом `TextureFormat→GL internal format`, вынесенным в отдельный package-private `GLTextureFormats.toGlInternalFormat` (тестируем без GL-контекста, исчерпывающий `switch` без default — бросает на будущих неучтённых значениях enum). Остальные 7 методов интерфейса (`compilePipeline`, `compileGraphicsPipeline`, `submit`, `insertFence`, `isSignaled`, `waitForFence`, `shutdown`) — явные `UnsupportedOperationException`-заглушки с комментарием, какой тикет реализует. `GLBuffer`/`GLTexture` (`dev.ev.gpu.gl`) — обёртки над raw GL handle; `GLBuffer.mappedAddress()` бросает `UnsupportedOperationException` если `usage() != STAGING_UPLOAD`; `free()` на обоих — идемпотентен (флаг `freed`), для замапленных буферов явный `glUnmapNamedBuffer` перед `glDeleteBuffers` (defensive, не строго обязательно по спеке GL, но безопасно для драйверов). Никакого мутируемого `static`-состояния в `GLRenderBackend` (архитектурное исправление проблемы прототипа Voxy со статическим scratch-буфером). Верифицировано через веб-поиск (не по памяти): (1) LWJGL 3.3.3 предоставляет и `GL45`, и `GL46`, но macOS исторически ограничен OpenGL 4.1 — оставлен `GL45` для широкой совместимости, как тикет и предлагал по умолчанию; (2) точная сигнатура `GL45.glNamedBufferStorage(int, long, int)` и то, что `glMapNamedBufferRange` в LWJGL возвращает `ByteBuffer`, а не `long` напрямую — адрес получается через `MemoryUtil.memAddress(ByteBuffer)`, отдельного `nglMapNamedBufferRange`-метода с такой сигнатурой не существует в публичном API (первоначальный вариант кода это использовал ошибочно и был исправлен после поиска). Тесты: `GLTextureFormatsTest` (полнота маппинга по всем значениям `TextureFormat.values()`, отсутствие коллизий между разными форматами, точечная проверка каждого из 5 значений на конкретную GL-константу). **Тесты, требующие реального GL-контекста (создание/освобождение буфера), не добавлены** — headless GL недоступен в этой песочнице, тикет явно делает это опциональным и не блокирующим приёмку. **Компиляция не прогнана реальным Gradle-билдом в этой сессии** — требует подтверждения `./gradlew :ev-gpu:test`.|
 | 18-gpu-backend-gl-shaders | NOT_STARTED | |
 | 19-gpu-upload-batching-opt | NOT_STARTED | |
 | 20-gpu-node-buffer (mvp/opt) | NOT_STARTED | |
@@ -77,7 +77,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-api | `dev.ev.api`, `dev.ev.api.storage`, `dev.ev.api.meshing`, `dev.ev.api.gpu`, `dev.ev.api.metrics` | Все 5 api-тикетов (01-05) выполнены — `SectionPos`; storage-, meshing-, gpu- и metrics-контракты. Модуль `ev-api` полностью укомплектован контрактами, дальше только реализация в `ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render`. |
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
 | ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue`, `dev.ev.meshing.mip` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. `MipAggregator` (16) — MVP (скалярная) агрегация mip-уровней активна. |
-| ev-gpu | — | Пусто. |
+| ev-gpu | `dev.ev.gpu.gl` | `GLRenderBackend` (17) — `createBuffer`/`createTexture` полностью реализованы (DSA-стиль GL 4.5+), остальные 7 методов `RenderBackend` — заглушки на будущие тикеты (18 — шейдеры; 19-23 — команды/fences/teardown). `GLBuffer`/`GLTexture` — обёртки над raw GL handles. `GLTextureFormats` — package-private маппинг `TextureFormat→GL internal format`, тестируемый без GL-контекста. |
 | ev-render | — | Пусто. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
 
@@ -349,6 +349,54 @@ traversal, если обнаружится нехватка) — сознате�
   (частотный массив по значению вместо попарного подсчёта) прямо внутри теста — метод не
   проверяется сам через себя, `parentCount=0` не изменяет предзаполненный `parentPalette`).
 
+### ev-gpu — `dev.ev.gpu.gl` (тикет 17)
+- `GLRenderBackend implements RenderBackend` — единственный класс проекта (вместе с `GLBuffer`/
+  `GLTexture`/`GLTextureFormats` в том же пакете), которому разрешено импортировать
+  `org.lwjgl.*`. В этом тикете полностью реализованы только `createBuffer`/`createTexture`;
+  остальные 7 методов интерфейса — `UnsupportedOperationException`-заглушки с комментарием,
+  какой тикет их реализует (18 — компиляция шейдеров; 19-23 — submit/fences/shutdown). Этот
+  же класс дополняется последующими тикетами, не заменяется отдельным конкурирующим классом.
+  **Никакого мутируемого `static`-состояния** — прямое архитектурное исправление проблемы,
+  задокументированной в анализе прототипа Voxy (статический scratch-буфер там ломал
+  поддержку нескольких миров/пересоздания GL-контекста).
+- `createBuffer(sizeBytes, usage)` — DSA-стиль (`glCreateBuffers`+`glNamedBufferStorage`,
+  GL 4.5+, без bind-to-edit паттерна). `STATIC_DRAW`/`DYNAMIC_DRAW`/`STORAGE` →
+  `GL_DYNAMIC_STORAGE_BIT` (разрешает будущие `glNamedBufferSubData`, включая для `STORAGE` —
+  трактовка требования 1 тикета: "редко" CPU-touched не значит "никогда"). `STAGING_UPLOAD`/
+  `STAGING_DOWNLOAD` — persistent-mapped через `glMapNamedBufferRange` с
+  `GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT` + `GL_MAP_WRITE_BIT`/`GL_MAP_READ_BIT`
+  соответственно; `long`-адрес получен через `MemoryUtil.memAddress(ByteBuffer)`, так как
+  LWJGL-биндинг `glMapNamedBufferRange` возвращает `ByteBuffer`, не `long` напрямую (см.
+  находку ниже). Валидация `sizeBytes > 0` → `IllegalArgumentException`.
+- `createTexture(desc)` — `glCreateTextures`+`glTextureStorage2D`/`3D` (3D если
+  `desc.depth() > 1`), `mipLevels` передаётся напрямую (валидация `>= 1`).
+  `TextureFormat → GL internal format` маппинг вынесен в отдельный package-private
+  `GLTextureFormats.toGlInternalFormat` — чистый метод без вызовов GL, поэтому тестируем без
+  GL-контекста; исчерпывающий `switch` без `default` — future-proof против забытых новых
+  значений `TextureFormat` (компилятор/рантайм укажут на пропуск явно).
+- `GLBuffer.mappedAddress()` — `UnsupportedOperationException`, если `usage() != STAGING_UPLOAD`
+  (контракт тикета 04). `GLBuffer.free()`/`GLTexture.free()` — идемпотентны (флаг `freed`);
+  для замапленных буферов явный `glUnmapNamedBuffer` перед `glDeleteBuffers` (не строго
+  обязательно по спеке GL — удаление неявно снимает маппинг, — но сделано explicit для
+  ясности и driver-compatibility safety, как прямо просил тикет).
+  **Верифицировано веб-поиском, не по памяти** (обе точки, которые тикет явно требовал
+  проверить): (1) GL45 vs GL46 — LWJGL 3.3.3 (версия, зафиксированная в проекте) содержит оба
+  класса, но macOS исторически ограничен OpenGL 4.1 (Apple заморозила поддержку на этом
+  уровне) — оставлен GL45 для широкой кроссплатформенной совместимости, как тикет и предлагал
+  по умолчанию при отсутствии явных доказательств безопасности GL46; (2) сигнатуры LWJGL API —
+  `GL45.glNamedBufferStorage(int buffer, long size, int flags)` подтверждена; изначально
+  написанный код ошибочно предполагал существование `GL45.nglMapNamedBufferRange(...)`,
+  возвращающего `long` напрямую — такого метода с этой сигнатурой в публичном API нет,
+  правильный путь — `glMapNamedBufferRange` (возвращает `ByteBuffer`) +
+  `org.lwjgl.system.MemoryUtil.memAddress(ByteBuffer)`; ошибка найдена и исправлена в процессе
+  этой же сессии до финальной сдачи, не оставлена как известный баг.
+  Файлы: `ev-gpu/src/main/java/dev/ev/gpu/gl/{GLRenderBackend,GLBuffer,GLTexture,GLTextureFormats}.java`.
+  Тесты: `GLTextureFormatsTest` (полнота маппинга по `TextureFormat.values()`, отсутствие
+  коллизий GL-констант между разными форматами, точечная проверка всех 5 значений).
+  Тесты, требующие реального GL-контекста (создание/освобождение буфера/текстуры), не
+  добавлены — headless GL недоступен в этой песочнице; тикет явно делает это опциональным
+  пунктом 2 раздела юнит-тестов, не блокирующим приёмку.
+
 ## Межмодульные контракты, зафиксированные де-факто
 
 - `dev.ev.api.SectionPos` (тикет 01) — стабильный контракт `ev-api`, на него будут
@@ -412,7 +460,10 @@ traversal, если обнаружится нехватка) — сознате�
   MVP (тикет 15-mvp, `MeshTaskQueue`, использующая `MeshPriority` из тикета 14 для сортировки)
   реализована; opt-версия (work-stealing, 15-opt) в банке, не применена. Mip-агрегация MVP
   (тикет 16-mvp, `MipAggregator`, скалярный majority-vote) реализована; SIMD opt-версия
-  (16-opt) в банке, не применена. GPU-бэкенд и рендер-оркестрация тоже ещё не реализованы.
+  (16-opt) в банке, не применена. GPU-бэкенд (тикет 17, `GLRenderBackend.createBuffer`/
+  `createTexture`) частично реализован — остальные 7 методов `RenderBackend` (компиляция
+  шейдеров, submit/fences/shutdown) ещё заглушки на тикеты 18-23. Рендер-оркестрация тоже
+  ещё не реализована.
 - **✅ Исправлено (2026-08-16, отдельная сессия по итогам реального `./gradlew build` пользователя)**:
   `ev-storage/build.gradle.kts` создан. Симптом на реальном билде совпал с тем, что было
   предсказано здесь заранее: `:ev-storage:compileJava FAILED`, 32 ошибки, все одного корня —
