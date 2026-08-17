@@ -30,7 +30,7 @@
 
 ### Этап 3: Волна 1 (MVP) — GPU, Рендеринг и Интеграция
 - [x] **17-gpu-backend-gl-buffers** — GL буферы
-- [ ] **18-gpu-backend-gl-shaders** — GLSL шейдеры
+- [x] **18-gpu-backend-gl-shaders** — GLSL шейдеры
 - [ ] **20-gpu-node-buffer-mvp** — MVP AoS node buffer
 - [ ] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
 - [ ] **24-render-frame-graph** — FrameGraph
@@ -1106,3 +1106,62 @@ createBuffer/createTexture only)", модульная карта (`ev-gpu` бо�
 явные заглушки на конкретные будущие тикеты, не общая пометка "не реализовано"). Расхождений
 между разделами, оставшихся от предыдущих тикетов, при сверке модуля `ev-gpu` не найдено —
 модуль был последовательно пуст во всех местах на момент начала этой сессии.
+
+## Тикет 18 — GLRenderBackend: компиляция шейдеров и автобиндинг (2026-08-17, отдельная сессия)
+
+Продолжение `GLRenderBackend` (тикет 17) — дополнен, не пересоздан. Реализованы
+`compilePipeline`/`compileGraphicsPipeline`, ранее явные `UnsupportedOperationException`-заглушки.
+
+- `ShaderCompiler` (новый, package-private) — `compileComputeProgram`/`compileGraphicsProgram`:
+  компиляция через `glCreateShader`+`glShaderSource`+`glCompileShader` с проверкой
+  `GL_COMPILE_STATUS`, линковка через `glCreateProgram`+`glAttachShader`+`glLinkProgram` с
+  проверкой `GL_LINK_STATUS`; при неудаче любого из шагов — `RuntimeException` с
+  `ShaderSource.sourcePath()` и полным `glGetShaderInfoLog`/`glGetProgramInfoLog`, как прямо
+  требовал тикет (диагностируемость для будущих тикетов 21-23, где появятся реальные шейдеры).
+  После успешной линковки — `glDetachShader`+`glDeleteShader` промежуточных шейдер-объектов.
+- `injectDefines(rawSource, defines)` — вынесен в отдельный package-private статический чистый
+  метод, как явно просил тикет для тестируемости без GL-контекста. Требует `#version` первой
+  строкой (иначе `IllegalArgumentException` — падение на Java-стороне раньше и понятнее, чем
+  малопонятная ошибка компиляции от драйвера); пустая карта defines — исходный текст без
+  изменений (без лишнего string-processing); непустая — `#define KEY VALUE` для каждой записи
+  вставляется сразу после `#version`-строки, до остального тела шейдера.
+- `GLComputePipeline`/`GLGraphicsPipeline` (новые, package-private конструктор, создаются
+  только через `GLRenderBackend`) — хранят program handle + `PipelineLayout.bindingsByName()`.
+  `bindBuffer`/`bindTexture` — map-lookup по имени, `IllegalArgumentException` при отсутствии
+  ключа (опечатка в имени биндинга не проглатывается молча, падает сразу — прямое требование
+  тикета). Биндинг буферов — `glBindBufferBase(GL_SHADER_STORAGE_BUFFER, ...)` по умолчанию;
+  тикет явно разрешил это допущение для SSBO-heavy проекта и попросил задокументировать —
+  сделано в Javadoc обоих классов. `dispatchIndirect` явно биндит `indirectBuffer` на
+  `GL_DISPATCH_INDIRECT_BUFFER` перед вызовом внутри метода (не полагается на внешний код —
+  прямое требование тикета, п.5). `free()` — `glDeleteProgram`, идемпотентно.
+
+**Отклонение от буквального текста тикета, не выходящее за рамки задачи**: `drawIndirect`/
+`drawIndirectCount` тикет не расписывал дословно построчно (фокус тикета — компиляция и
+биндинги, п.5 говорит только про `dispatch`/`dispatchIndirect`). Реализованы по контракту
+интерфейса `GraphicsPipeline` из тикета 04 через `glMultiDrawArraysIndirect`/
+`glMultiDrawArraysIndirectCount` (`GL_TRIANGLES`, `stride=0`) — необходимо, поскольку интерфейс
+требует эти методы у любого класса, реализующего `GraphicsPipeline`, иначе `GLGraphicsPipeline`
+не скомпилируется. Названо явно здесь, а не замаскировано молчанием.
+
+Тесты (`ShaderCompilerTest`, 6 сценариев): пустые defines не меняют исходный текст; один
+define вставлен сразу после `#version`; несколько defines вставлены все, в порядке `Map`;
+точная проверка позиции вставки (сразу после `#version`-строки, не в конец файла и не перед
+`#version`); `IllegalArgumentException` при отсутствии `#version`-строки — отдельно для
+пустых и для непустых defines. Тесты, требующие реального GL-контекста (сама компиляция/
+линковка шейдера в драйвере), не добавлены — headless GL недоступен в этой песочнице, та же
+причина ограничения, что и в тикете 17.
+
+Компиляция не прогнана реальным Gradle-билдом в этой сессии — то же ограничение песочницы
+(нет доступа к `services.gradle.org`/`maven.neoforged.net`), что и во всех предыдущих
+GPU/JVM-тикетах. Подтверждение `./gradlew :ev-gpu:test` остаётся задачей следующей сессии с
+обычным доступом в интернет.
+
+`PROJECT_INDEX.md` обновлён за один проход: статус тикета 18 → DONE (таблица "Статус
+тикетов"), модульная карта (`ev-gpu` — добавлены `ShaderCompiler`/`GLComputePipeline`/
+`GLGraphicsPipeline` в список ключевых классов модуля), "Ключевые классы" (новый абзац под
+заголовком "тикеты 17, 18" — заголовок секции переименован, не оставлен как "тикет 17" при
+дополнении содержимым тикета 18), "Чего пока не существует" (GPU-бэкенд теперь "тикеты 17-18"
+реализованы, оставшиеся 5 методов — заглушки на тикеты 19-23, было "17" и "7 методов"/"18-23").
+Перед правкой сверено дерево файлов `ev-gpu/src` с текущим текстом всех четырёх мест —
+расхождений, оставшихся от тикета 17 (предыдущей сессии), не найдено: описание тикета 17 в
+файле точно соответствовало фактическому состоянию кода на момент начала этой сессии.

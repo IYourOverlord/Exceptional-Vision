@@ -38,11 +38,12 @@ import java.nio.ByteBuffer;
  * prototype analysis (Voxy): a static scratch buffer there broke support for multiple worlds
  * or GL-context recreation, since static state outlives any single world/context's lifetime.
  *
- * <p><b>Scope of this ticket:</b> only {@link #createBuffer} and {@link #createTexture} are
- * fully implemented here. {@link #compilePipeline}, {@link #compileGraphicsPipeline}, {@link
- * #submit}, {@link #insertFence}, {@link #isSignaled}, {@link #waitForFence}, and {@link
- * #shutdown} are stubs — see each method's Javadoc for which later ticket implements it. This
- * same class is extended in place by those later tickets, not replaced by a competing class.
+ * <p><b>Scope so far:</b> {@link #createBuffer}, {@link #createTexture} (ticket 17), and {@link
+ * #compilePipeline}/{@link #compileGraphicsPipeline} (ticket 18, GLSL compilation via {@link
+ * ShaderCompiler}) are fully implemented. {@link #submit}, {@link #insertFence}, {@link
+ * #isSignaled}, {@link #waitForFence}, and {@link #shutdown} remain stubs — see each method's
+ * Javadoc for which later ticket implements it. This same class is extended in place by those
+ * later tickets, not replaced by a competing class.
  */
 public final class GLRenderBackend implements RenderBackend {
 
@@ -104,16 +105,16 @@ public final class GLRenderBackend implements RenderBackend {
         return new GLTexture(handle, desc);
     }
 
-    /** Implemented in ticket 18 (GLSL shader compilation). */
     @Override
     public ComputePipeline compilePipeline(ShaderSource source, PipelineLayout layout) {
-        throw new UnsupportedOperationException("implemented in a later ticket (18-gpu-backend-gl-shaders)");
+        int programHandle = ShaderCompiler.compileComputeProgram(source);
+        return new GLComputePipeline(programHandle, layout);
     }
 
-    /** Implemented in ticket 18 (GLSL shader compilation). */
     @Override
     public GraphicsPipeline compileGraphicsPipeline(ShaderSource vertexSrc, ShaderSource fragmentSrc, PipelineLayout layout) {
-        throw new UnsupportedOperationException("implemented in a later ticket (18-gpu-backend-gl-shaders)");
+        int programHandle = ShaderCompiler.compileGraphicsProgram(vertexSrc, fragmentSrc);
+        return new GLGraphicsPipeline(programHandle, layout);
     }
 
     /** Implemented in a later ticket (command list recording/execution, tickets 19-23). */
