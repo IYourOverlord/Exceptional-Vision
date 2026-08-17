@@ -34,7 +34,7 @@
 - [x] **20-gpu-node-buffer-mvp** — MVP AoS node buffer
 - [x] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
 - [x] **24-render-frame-graph** — FrameGraph
-- [ ] **26-render-dirty-tracking-mvp** — MVP dirty tracking
+- [x] **26-render-dirty-tracking-mvp** — MVP dirty tracking
 - [ ] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
 - [ ] **28-neoforge-config** — Конфигурация мода
 - [ ] **29-neoforge-commands** — Команды управления
@@ -1262,3 +1262,18 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 5. `FrameGraphBuilderTest`: добавлен недостающий импорт `dev.ev.api.gpu.BufferUsage`.
 
 Все ошибки исправлены, сигнатуры приведены в строгое соответствие с контрактом `dev.ev.api.gpu`.
+
+## Тикет 26-mvp — Dirty Section Tracking (полная пересборка секции при правке блока) (2026-08-17, отдельная сессия)
+
+Реализовано MVP (Волна-1) отслеживание dirty-состояния секций (`dev.ev.render.dirty`):
+- `DirtySectionTracker` (`dev.ev.render.dirty.DirtySectionTracker`) — отслеживает затронутые секции целиком на основе `LongOpenHashSet` из `fastutil` для хранения закодированных `SectionPos.encode()`. Разработан как single-thread (main world-tick thread) по назначению.
+- `GeometryChangeDeduplicator` (`dev.ev.render.dirty.GeometryChangeDeduplicator`) — производит расчёт порядка-зависимого CRC32-хэша списка `Quad` и проверяет смену хэша относительно сохранённого ранее значения для секции (`recordAndCheckChanged`). Возвращает `true` при первом запуске или изменении геометрии, пресекая неэффективные перезаписи GPU/диска при тиках энтити и поворотных блоках без изменения формы.
+- Ни один класс не импортирует `org.lwjgl.*`.
+- Юнит-тесты: `DirtySectionTrackerTest` (5 сценариев) и `GeometryChangeDeduplicatorTest` (4 сценария).
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 8 — Добавление зависимости fastutil в `ev-render/build.gradle.kts` (2026-08-17)
+
+При компиляции `ev-render:compileJava` возникла ошибка `package it.unimi.dsi.fastutil.longs does not exist`. Причина: модуль `ev-render` до тикета 26 не использовал `fastutil` напрямую, в `ev-render/build.gradle.kts` отсутствовала зависимость.
+Добавлена строка `implementation("it.unimi.dsi:fastutil:${property("fastutil_version")}")` в `ev-render/build.gradle.kts`.

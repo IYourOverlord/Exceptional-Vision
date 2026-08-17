@@ -46,7 +46,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | 23-gpu-indirect-multidraw-opt | NOT_STARTED | |
 | 24-render-frame-graph | DONE | `dev.ev.render.framegraph.FrameGraphBuilder` — декларативный билдер графа GPU-проходов кадра. Использование: single-use per frame instance. Проводит топологическую сортировку (алгоритм Кана) по ресурсам `FrameResource`, проверяет циклы (`IllegalStateException`), вставляет консервативный memory barrier (`BarrierScope.ALL`) непосредственно перед проходом `P`, если какой-либо из предшествующих проходов `Q` писал в ресурс, читаемый или пишимый `P`. Исполняет все команды через единственный `RenderBackend.submit(CommandList)` за кадр и записывает длительность каждого прохода в `MetricsRegistry`. |
 | 25-render-temporal-reprojection-opt | NOT_STARTED | |
-| 26-render-dirty (tracking-mvp/subregion-opt) | NOT_STARTED | |
+| 26-render-dirty (tracking-mvp/subregion-opt) | DONE (mvp) | **Dirty tracking — MVP (whole-section) версия активна, sub-region opt-версия в банке, не применена.** `dev.ev.render.dirty.DirtySectionTracker` (отслеживание изменений на уровне всей секции целиком через `LongOpenHashSet` закодированных `SectionPos`) и `dev.ev.render.dirty.GeometryChangeDeduplicator` (дедупликация по CRC32-хэшу `Quad`-списка секции, предотвращающая лишние выгрузки на GPU/записи на диск при неизменившейся геометрии). |
 | 27-neoforge-mod-entrypoint | IN_PROGRESS | Минимальный класс `EV` создан тикетом 00 (пустой entrypoint, только лог). Полноценная реализация (события, worker pool) — предмет самого тикета 27, ещё не выполнена. |
 | 28-neoforge-config | NOT_STARTED | |
 | 29-neoforge-commands | NOT_STARTED | |
@@ -67,7 +67,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | Mip-агрегация | MVP (скалярная) | 16-meshing-mipgen-mvp | — |
 | GPU upload | нет (не реализовано) | — | — |
 | Draw calls | нет (не реализовано) | — | — |
-| Dirty tracking | нет (не реализовано) | — | — |
+| Dirty tracking | MVP (whole-section + deduplicator) | 26-render-dirty-tracking-mvp | — |
 
 ## Модульная карта (`ev-*/src/main/java/dev/ev/...`)
 
@@ -78,7 +78,7 @@ PERFORMANCE_MATH.md для полного архитектурного обос�
 | ev-storage | `dev.ev.storage.codec`, `dev.ev.storage.schema`, `dev.ev.storage.cache`, `dev.ev.storage.coarsegen` | `PaletteCodec`+кодеки (06), `SchemaVersion`/`SchemaMigrationChain`/`RegionFileHeader` (07), `SectionCache`-MVP (08), `HeightmapSource`/`CoarseSectionGenerator` (09). `build.gradle.kts` присутствует (см. "Сборка/тесты" ниже — был случайно пропущен в тикете 00, восстановлен отдельной правкой после реального прогона пользователя). |
 | ev-meshing | `dev.ev.meshing.stage`, `dev.ev.meshing.priority`, `dev.ev.meshing.queue`, `dev.ev.meshing.mip` | `OccupancySet`/`OccupancyStage` (10), `GreedyMeshStage` (11), `MaterialBin`/`MaterialBinStage` (12) и `MeshletPackStage` (13) — весь конвейер Occupancy→GreedyMesh→MaterialBin→MeshletPack реализован. `ScreenSpaceErrorMetric`/`MeshPriority` (14) — выбор LOD-уровня и приоритет задачи мешинга. `MeshTaskQueue` (15) — MVP (PriorityBlockingQueue) очередь задач мешинга активна. `MipAggregator` (16) — MVP (скалярная) агрегация mip-уровней активна. |
 | ev-gpu | `dev.ev.gpu.gl`, `dev.ev.gpu.nodes` | `GLRenderBackend` (17, 18) — `createBuffer`/`createTexture` (17) и `compilePipeline`/`compileGraphicsPipeline` (18, через `ShaderCompiler`) полностью реализованы; остальные 5 методов `RenderBackend` — заглушки на будущие тикеты (19-23). `NodeBuffer` (20-mvp) — MVP AoS раскладка GPU-буфера узлов секций (`BYTES_PER_NODE = 32`). |
-| ev-render | `dev.ev.render.culling`, `dev.ev.render.framegraph` | `FrustumTester` (sphere-vs-6-planes test) и `SimpleTraversal` (21-mvp) — MVP culling. `FrameResource`, `FramePass`, `PassBuilder`, `FrameGraphBuilder` (24) — декларативный граф проходов кадра, топологический сорт (Kahn's), вставка барьеров `BarrierScope.ALL` и отправка команд в `RenderBackend.submit()`. |
+| ev-render | `dev.ev.render.culling`, `dev.ev.render.framegraph`, `dev.ev.render.dirty` | `FrustumTester` и `SimpleTraversal` (21-mvp) — culling. `FrameResource`, `FramePass`, `PassBuilder`, `FrameGraphBuilder` (24) — frame graph. `DirtySectionTracker` и `GeometryChangeDeduplicator` (26-mvp) — MVP whole-section dirty tracking с CRC32 дедупликацией геометрии. |
 | ev-test | — | Пусто, нет ни одного тестового класса. |
 
 ## Ключевые классы
@@ -442,11 +442,13 @@ traversal, если обнаружится нехватка) — сознате�
   фактическим прогоном пользователем (2026-08-17, `./gradlew build` — `BUILD SUCCESSFUL`,
   включая `ev-gpu:compileJava`/`test`/`check`/`build`)**.
 
-### ev-render — `dev.ev.render.culling`, `dev.ev.render.framegraph` (тикеты 21-mvp, 24)
+### ev-render — `dev.ev.render.culling`, `dev.ev.render.framegraph`, `dev.ev.render.dirty` (тикеты 21-mvp, 24, 26-mvp)
 - `FrustumTester` (`dev.ev.render.culling`) — математический сферно-плоскостной тест видимости (sphere-vs-6-planes). Метод `isVisible(worldX, worldY, worldZ, radius)` делает консервативную проверку (`signedDistance < -radius` -> reject).
 - `SimpleTraversal` (`dev.ev.render.culling`) — MVP (Волна-1) CPU-side проход линейной сложности `O(N)` по списку `loadedSections`. Замеряет wall-clock время каждого вызова в наносекундах и записывает метрику `MetricsRegistry.recordGpuPassDuration("cpu-traversal", nanos)`.
 - `FrameResource` / `FramePass` / `PassBuilder` / `FrameGraphBuilder` (`dev.ev.render.framegraph`, тикет 24) — декларативная оркестрация кадра. Использование: single-use per frame instance (`execute()` можно вызвать строго один раз). Топологическая сортировка (алгоритм Кана по читаемым/пишимым ресурсам), проверка циклов (`IllegalStateException`), вставка барьеров памяти `BarrierScope.ALL` перед проходом `P`, если какой-либо ранний проход `Q` писал в ресурс, используемый `P`. Единая отправка через `RenderBackend.submit(CommandList)` за кадр и замер времени через `MetricsRegistry.recordGpuPassDuration`.
-  Тесты: `FrameGraphBuilderTest` (6 сценариев, включая циклы, независимые проходы, и промежуточные проходы).
+- `DirtySectionTracker` (`dev.ev.render.dirty`, тикет 26-mvp) — MVP отслеживание dirty-состояния на уровне всей секции целиком через `LongOpenHashSet` закодированных `SectionPos`. Не потокбезопасен по дизайну (main-thread tick).
+- `GeometryChangeDeduplicator` (`dev.ev.render.dirty`, тикет 26-mvp) — дедупликация пересборки геометрии по CRC32-хэшу `Quad`-списка секции, предотвращает лишние GPU upload / дисковые записи при байт-в-байт идентичном результате.
+  Тесты: `DirtySectionTrackerTest` (5 сценариев), `GeometryChangeDeduplicatorTest` (4 сценария).
 
 ## Межмодульные контракты, зафиксированные де-факто
 
