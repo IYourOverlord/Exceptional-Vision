@@ -100,6 +100,11 @@ class NodeBufferTest {
         }
 
         @Override
+        public long mappedAddress() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public void free() {
         }
     }
@@ -141,7 +146,7 @@ class NodeBufferTest {
         }
 
         @Override
-        public void waitForFence(FenceHandle fence, long timeoutNanos) {
+        public boolean waitForFence(FenceHandle fence, long timeoutNanos) {
             throw new UnsupportedOperationException();
         }
 

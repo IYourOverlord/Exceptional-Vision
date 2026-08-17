@@ -2,8 +2,9 @@ package dev.ev.render.framegraph;
 
 import dev.ev.api.gpu.BarrierScope;
 import dev.ev.api.gpu.CommandList;
+import dev.ev.api.gpu.ComputePipeline;
 import dev.ev.api.gpu.GpuBuffer;
-import dev.ev.api.gpu.GpuTexture;
+import dev.ev.api.gpu.GraphicsPipeline;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,26 +24,26 @@ class RecordingCommandList implements CommandList {
     }
 
     @Override
-    public void uploadToBuffer(GpuBuffer destination, long destOffsetBytes, long srcDataAddress, long lengthBytes) {
+    public void uploadToBuffer(GpuBuffer target, long targetOffsetBytes, long sourceAddress, long sizeBytes) {
     }
 
     @Override
-    public void copyBuffer(GpuBuffer source, GpuBuffer destination, long sourceOffset, long destOffset, long lengthBytes) {
+    public void copyBuffer(GpuBuffer src, long srcOffset, GpuBuffer dst, long dstOffset, long sizeBytes) {
     }
 
     @Override
-    public void clearBuffer(GpuBuffer buffer, long offsetBytes, long lengthBytes, int fillValue) {
+    public void clearBuffer(GpuBuffer buffer, long offsetBytes, long sizeBytes, int fillValue) {
     }
 
     @Override
-    public void dispatchCompute(int numGroupsX, int numGroupsY, int numGroupsZ) {
+    public void dispatchCompute(ComputePipeline pipeline, int groupsX, int groupsY, int groupsZ) {
     }
 
     @Override
-    public void dispatchComputeIndirect(GpuBuffer indirectBuffer, long offsetBytes) {
+    public void dispatchComputeIndirect(ComputePipeline pipeline, GpuBuffer indirectBuffer, long offsetBytes) {
     }
 
     @Override
-    public void draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance) {
+    public void draw(GraphicsPipeline pipeline, GpuBuffer indirectBuffer, long offsetBytes, int drawCount) {
     }
 }

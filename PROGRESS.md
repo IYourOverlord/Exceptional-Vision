@@ -1251,3 +1251,14 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии из-за ограничений среды.
 
 `PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 7 — Исправление рассинхронизации сигнатур фейковых реализаций в тесах (2026-08-17)
+
+При реальном прогоне `./gradlew build` выявлены ошибки компиляции `ev-gpu:compileTestJava` и `ev-render:compileJava`:
+1. `NodeBufferTest.FakeRenderBackend`: метод `waitForFence` возвращал `void` вместо `boolean`, как в контракте `RenderBackend`.
+2. `NodeBufferTest.FakeGpuBuffer`: отсутствовала реализация метода `mappedAddress()`, объявленного в `GpuBuffer`.
+3. `RecordingCommandList`: сигнатура метода `draw` устарела относительно `CommandList` из тикета 04 (`draw(int,int,int,int)` вместо `draw(GraphicsPipeline,GpuBuffer,long,int)`), также исправлены параметры `uploadToBuffer`, `copyBuffer`, `dispatchCompute`, `dispatchComputeIndirect`.
+4. `FrameGraphBuilderTest.TestRenderBackend`: `waitForFence` возвращал `void` вместо `boolean`.
+5. `FrameGraphBuilderTest`: добавлен недостающий импорт `dev.ev.api.gpu.BufferUsage`.
+
+Все ошибки исправлены, сигнатуры приведены в строгое соответствие с контрактом `dev.ev.api.gpu`.

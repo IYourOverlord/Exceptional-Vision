@@ -1,5 +1,6 @@
 package dev.ev.render.framegraph;
 
+import dev.ev.api.gpu.BufferUsage;
 import dev.ev.api.gpu.CommandList;
 import dev.ev.api.gpu.ComputePipeline;
 import dev.ev.api.gpu.FenceHandle;
@@ -250,7 +251,7 @@ class FrameGraphBuilderTest {
         }
 
         @Override
-        public void waitForFence(FenceHandle fence, long timeoutNanos) {
+        public boolean waitForFence(FenceHandle fence, long timeoutNanos) {
             throw new UnsupportedOperationException();
         }
 
