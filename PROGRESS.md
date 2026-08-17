@@ -32,7 +32,7 @@
 - [x] **17-gpu-backend-gl-buffers** — GL буферы
 - [x] **18-gpu-backend-gl-shaders** — GLSL шейдеры
 - [x] **20-gpu-node-buffer-mvp** — MVP AoS node buffer
-- [ ] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
+- [x] **21-gpu-simple-traversal-mvp** — MVP CPU traversal
 - [ ] **24-render-frame-graph** — FrameGraph
 - [ ] **26-render-dirty-tracking-mvp** — MVP dirty tracking
 - [ ] **27-neoforge-mod-entrypoint** — NeoForge Mod Entrypoint
@@ -1218,6 +1218,19 @@ artifact `lwjgl-opengl`, уже подключённый в `ev-gpu/build.gradle
 - Javadoc класса содержит явное документирование MVP-статуса, предупреждение о несовместимости контракта публичного API с будущим SoA (`20-opt`), а также пояснение отсутствия поля `childMask` (так как в MVP traversal делается на CPU).
 - `node_buffer_aos.glsl` (`ev-gpu/src/main/resources/shaders/include/node_buffer_aos.glsl`) — шейдерный include-файл с объявлением структуры `Node` (vec4 bounds, uint flags, uint materialRef, uint streamState, uint _padding) и буфера `NodeBufferAoS`. Явно выдержано выравнивание по правилам `std430` (32 байта на элемент, кратно 16 для `vec4`).
 - Юнит-тесты: `NodeBufferTest` (проверка арифметики емкости и размера, проверка вызова `free()` ровно один раз через `close()`, проверка валидации аргументов конструктора).
+
+Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии из-за ограничений среды.
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+## Тикет 21-mvp — CPU-Side Frustum Culling & Simple Traversal (2026-08-17, отдельная сессия)
+
+Реализована MVP (Волна-1) версия traversal/culling: простой CPU-side проход линейной сложности `O(N)` по всем загруженным секциям с проверкой видимости через сферно-плоскостной frustum тест. Без GPU persistent kernel, без occlusion culling (`22-opt`) и без temporal coherence (`25-opt`).
+
+- `FrustumTester` (`dev.ev.render.culling.FrustumTester`) — проверяет 6 плоскостей пирамиды видимости против ограничивающей сферы (`worldX, worldY, worldZ, radius`). Возвращает `false` при раннем выходе, если сфера полностью за плоскостью (`signedDistance < -radius`), иначе `true` (консервативная видимость).
+- `SimpleTraversal` (`dev.ev.render.culling.SimpleTraversal`) — выполняет обход списка `loadedSections`, фильтрует через `FrustumTester` и в обязательном порядке хронометрирует вызов в wall-clock наносекундах через `MetricsRegistry.recordGpuPassDuration("cpu-traversal", nanos)`.
+- Ни один из классов не импортирует `org.lwjgl.*` (соблюдено архитектурное разделение модулей).
+- Юнит-тесты: `FrustumTesterTest` (4 теста: сфера в центре, за пределами, частично пересекающая, и граничный случай на поверхности с радиусом 0) и `SimpleTraversalTest` (5 тестов: пустой список, все видимы, ни одна не видима, смешанный случай, и обязательная проверка вызова метрик `recordGpuPassDuration`).
 
 Компиляция/тесты не прогнаны реальным Gradle-билдом в этой сессии из-за ограничений среды.
 
