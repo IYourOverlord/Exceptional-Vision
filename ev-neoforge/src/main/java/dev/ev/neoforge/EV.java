@@ -1,6 +1,8 @@
 package dev.ev.neoforge;
 
+import dev.ev.api.SectionPos;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.core.BlockPos;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
@@ -9,6 +11,7 @@ import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,9 +20,10 @@ import org.slf4j.LoggerFactory;
  * Main NeoForge entrypoint for the Exceptional Vision (EV) far-render mod.
  * Registered via {@code @Mod("ev")}.
  * <p>
- * Client-only lifecycle events (world load/unload, level render stage) are registered on
- * {@link NeoForge#EVENT_BUS} only when running on physical client ({@code FMLEnvironment.dist == Dist.CLIENT}),
- * preventing crashes or accidental classloading on dedicated servers.
+ * Client-only lifecycle events (world load/unload, level render stage, block changes)
+ * are registered on {@link NeoForge#EVENT_BUS} only when running on physical client
+ * ({@code FMLEnvironment.dist == Dist.CLIENT}), preventing crashes or accidental
+ * classloading on dedicated servers.
  */
 @Mod(EV.MODID)
 public final class EV {
@@ -42,13 +46,12 @@ public final class EV {
             NeoForge.EVENT_BUS.addListener(this::onLevelUnload);
             NeoForge.EVENT_BUS.addListener(this::onRenderLevelStage);
             NeoForge.EVENT_BUS.addListener(this::onRegisterClientCommands);
+            NeoForge.EVENT_BUS.addListener(this::onBlockBreak);
+            NeoForge.EVENT_BUS.addListener(this::onBlockPlace);
         }
     }
 
     private void onClientSetup(FMLClientSetupEvent event) {
-        // FMLClientSetupEvent runs early before OpenGL context and world levels are ready.
-        // EVInstance.bootstrap() is deliberately deferred to onLevelLoad (or first render pass)
-        // when a live GL context is guaranteed.
         LOGGER.info("EV client setup completed");
     }
 
@@ -58,7 +61,6 @@ public final class EV {
     }
 
     private void onLevelLoad(LevelEvent.Load event) {
-        // Act ONLY on physical client and client-side levels (event.getLevel() instanceof ClientLevel)
         if (event.getLevel() instanceof ClientLevel) {
             LOGGER.info("Client level loaded, initializing EVInstance");
             if (instance != null) {
@@ -87,10 +89,30 @@ public final class EV {
         if (instance == null) {
             return;
         }
-
-        // Target stage: AFTER_SOLID_BLOCKS for rendering far LOD geometry over solid terrain
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_SOLID_BLOCKS) {
             instance.renderFarLod(event);
         }
+    }
+
+    /**
+     * Marks the containing EV section dirty when a player breaks a block.
+     * DirtySectionTracker is not thread-safe, but BlockEvent fires on the main thread.
+     */
+    private void onBlockBreak(BlockEvent.BreakEvent event) {
+        markBlockDirty(event.getPos());
+    }
+
+    /**
+     * Marks the containing EV section dirty when an entity places a block.
+     */
+    private void onBlockPlace(BlockEvent.EntityPlaceEvent event) {
+        markBlockDirty(event.getPos());
+    }
+
+    private void markBlockDirty(BlockPos pos) {
+        if (instance == null) return;
+        // LOD level 0 section containing this block coordinate
+        SectionPos section = SectionPos.fromBlockCoord(0, pos.getX(), pos.getY(), pos.getZ());
+        instance.dirtyTracker().markSectionDirty(section);
     }
 }

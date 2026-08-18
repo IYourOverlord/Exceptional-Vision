@@ -1,10 +1,32 @@
 package dev.ev.neoforge;
 
-import dev.ev.api.gpu.BufferUsage;
-import dev.ev.api.gpu.GpuBuffer;
+import dev.ev.api.SectionPos;
 import dev.ev.api.gpu.RenderBackend;
+import dev.ev.api.metrics.MetricsRegistry;
+import dev.ev.api.meshing.MeshletBatch;
 import dev.ev.gpu.gl.GLRenderBackend;
+import dev.ev.meshing.queue.MeshTaskQueue;
+import dev.ev.neoforge.adapter.BlockPalette;
+import dev.ev.neoforge.adapter.MinecraftHeightmapSource;
+import dev.ev.neoforge.config.EVConfig;
+import dev.ev.neoforge.config.EVConfigLoader;
+import dev.ev.render.culling.FrustumTester;
+import dev.ev.render.culling.SimpleTraversal;
+import dev.ev.render.dirty.DirtySectionTracker;
+import dev.ev.render.dirty.GeometryChangeDeduplicator;
 import dev.ev.render.framegraph.FrameGraphBuilder;
+import dev.ev.render.framegraph.FramePass;
+import dev.ev.render.scheduling.MeshSchedulingCoordinator;
+import dev.ev.render.scheduling.MeshTask;
+import dev.ev.render.scheduling.MeshWorkerPool;
+import dev.ev.render.scheduling.MeshingPipelineRunner;
+import dev.ev.render.scheduling.SectionGeometryMap;
+import dev.ev.render.scheduling.SectionGenerationPolicy;
+import dev.ev.render.scheduling.SimpleMeshingContext;
+import dev.ev.storage.cache.InMemorySectionLoader;
+import dev.ev.storage.cache.LruEvictionPolicy;
+import dev.ev.storage.cache.SectionCache;
+import dev.ev.storage.coarsegen.CoarseSectionGenerator;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
@@ -12,85 +34,128 @@ import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL20;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
  * Owns the lifecycle of EV's rendering subsystems for one active world/dimension
- * context: the RenderBackend (GL), the FrameGraphBuilder, and far-LOD orchestration.
+ * context: the RenderBackend (GL), the meshing pipeline, traversal, and far-LOD
+ * orchestration.
  * <p>
  * Exactly one EVInstance should exist per loaded client world at a time — created
- * on world/dimension load (or first render frame with live GL context), torn down on unload,
- * never reused across worlds (enforcing the "no mutable static state, no cross-world resource leakage"
- * principle from ARCHITECTURE.md).
+ * on world/dimension load, torn down on unload, never reused across worlds.
  */
 public final class EVInstance implements AutoCloseable {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(EVInstance.class);
+
     private final RenderBackend backend;
-    private final FrameGraphBuilder frameGraphBuilder;
-    private final dev.ev.api.metrics.MetricsRegistry metricsRegistry;
+    private final MetricsRegistry metricsRegistry;
+    private final EVConfig config;
+
+    // Storage
+    private final SectionCache sectionCache;
+    private final BlockPalette blockPalette;
+    private final SectionGenerationPolicy generationPolicy;
+
+    // Meshing pipeline
+    private final MeshTaskQueue<MeshTask> meshTaskQueue;
+    private final MeshWorkerPool meshWorkerPool;
+    private final MeshingPipelineRunner pipelineRunner;
+    private final GeometryChangeDeduplicator deduplicator;
+
+    // Dirty tracking & scheduling
+    private final DirtySectionTracker dirtyTracker;
+    private final MeshSchedulingCoordinator schedulingCoordinator;
+
+    // Render-time state
+    private final SimpleTraversal traversal;
+    private final SectionGeometryMap geometryMap;
+
     private boolean closed = false;
     private volatile boolean debugOverlayEnabled = false;
 
-    private EVInstance(RenderBackend backend) {
-        this.backend = Objects.requireNonNull(backend, "backend cannot be null");
+    private EVInstance(RenderBackend backend, EVConfig config) {
+        this.backend = Objects.requireNonNull(backend);
+        this.config = Objects.requireNonNull(config);
         this.metricsRegistry = new NoopMetricsRegistry();
-        // FrameGraphBuilder in MVP takes backend and a metrics registry (or no-op placeholder if metrics unavailable)
-        this.frameGraphBuilder = new FrameGraphBuilder(backend, metricsRegistry);
+
+        // Storage subsystem
+        this.sectionCache = new SectionCache(
+            1, // shardCountPowerOfTwo ignored in MVP impl
+            new InMemorySectionLoader(),
+            new LruEvictionPolicy(),
+            metricsRegistry
+        );
+        this.blockPalette = new BlockPalette();
+        this.generationPolicy = new SectionGenerationPolicy();
+
+        // Meshing pipeline
+        this.meshTaskQueue = new MeshTaskQueue<>(metricsRegistry);
+        this.pipelineRunner = new MeshingPipelineRunner();
+        this.deduplicator = new GeometryChangeDeduplicator();
+        this.meshWorkerPool = new MeshWorkerPool(
+            config.workerThreadCount(),
+            meshTaskQueue,
+            sectionCache,
+            pipelineRunner,
+            deduplicator,
+            SimpleMeshingContext.INSTANCE
+        );
+
+        // Dirty tracking & scheduling
+        this.dirtyTracker = new DirtySectionTracker();
+        this.schedulingCoordinator = new MeshSchedulingCoordinator(meshTaskQueue, dirtyTracker);
+
+        // Render-time state
+        this.traversal = new SimpleTraversal(metricsRegistry);
+        this.geometryMap = new SectionGeometryMap();
     }
 
     /**
      * Bootstraps a new EVInstance with a fresh GLRenderBackend.
-     * Must be called on the client thread with an active OpenGL context (e.g. level load or first render frame).
+     * Must be called on the client thread with an active OpenGL context.
      *
      * @return newly initialized EVInstance
      */
     public static EVInstance bootstrap() {
+        EVConfigLoader.reloadFromSpec();
+        EVConfig config = EVConfigLoader.current();
         GLRenderBackend backend = new GLRenderBackend();
-        return new EVInstance(backend);
+        return new EVInstance(backend, config);
     }
 
-    /**
-     * Returns the MetricsRegistry for this instance, used by /ev debug commands.
-     *
-     * @return the metrics registry (never null)
-     */
-    public dev.ev.api.metrics.MetricsRegistry metrics() {
+    /** Returns the MetricsRegistry for this instance, used by /ev debug commands. */
+    public MetricsRegistry metrics() {
         return metricsRegistry;
     }
 
-    /**
-     * Whether the debug overlay is currently enabled (toggled via /ev debug watch).
-     *
-     * @return true if debug overlay is active
-     */
+    /** Returns the DirtySectionTracker, called by block-change listener in EV.java. */
+    public DirtySectionTracker dirtyTracker() {
+        return dirtyTracker;
+    }
+
+    /** Returns the BlockPalette for Minecraft adapters. */
+    public BlockPalette blockPalette() {
+        return blockPalette;
+    }
+
+    /** Whether the debug overlay is currently enabled. */
     public boolean isDebugOverlayEnabled() {
         return debugOverlayEnabled;
     }
 
-    /**
-     * Sets the debug overlay state. Called by /ev debug watch command.
-     * The actual overlay rendering is TODO — this flag controls data collection.
-     *
-     * @param enabled true to enable
-     */
+    /** Sets the debug overlay state. */
     public void setDebugOverlayEnabled(boolean enabled) {
         this.debugOverlayEnabled = enabled;
     }
 
     /**
-     * Calculates the near cutoff distance in block units that circumscribes the square vanilla chunk loading zone.
-     * <p>
-     * <b>Empirical lesson (Exceptional Vision):</b>
-     * Vanilla chunk loading is a SQUARE of side length {@code renderDistanceChunks * 16} blocks, not a circle.
-     * A simple circle of radius {@code renderDistanceChunks * 16} touches the sides of the square but leaves
-     * corner regions unrendered by vanilla, causing diagonal wedge-shaped gaps.
-     * Multiplying by {@code Math.sqrt(2.0)} ensures the cutoff radius circumscribes the full square,
-     * including its corners (diagonal length = {@code side * sqrt(2)}).
-     *
-     * @param renderDistanceChunks current effective vanilla render distance in chunks
-     * @param marginChunks safety margin in chunks
-     * @return near cutoff distance in blocks
+     * Circumscribes the square vanilla chunk loading zone.
+     * Multiplying by sqrt(2) ensures the cutoff radius covers corners of the square.
      */
     public static float calculateNearCutoffBlocks(int renderDistanceChunks, float marginChunks) {
         return renderDistanceChunks * 16.0f * (float) Math.sqrt(2.0) + marginChunks * 16.0f;
@@ -98,33 +163,68 @@ public final class EVInstance implements AutoCloseable {
 
     /**
      * Executes far-LOD rendering for the current frame.
-     * Called during {@link RenderLevelStageEvent} (e.g. {@code AFTER_SOLID_BLOCKS}).
+     * Called during {@link RenderLevelStageEvent} (AFTER_SOLID_BLOCKS).
      * <p>
-     * <b>Sodium / Embeddium Compatibility Guarantee:</b>
-     * Strictly restores OpenGL pipeline state before returning:
-     * {@code glUseProgram(0)}, {@code glBindBuffer(GL_ARRAY_BUFFER, 0)},
-     * {@code glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0)}, {@code glDepthMask(true)}, {@code glEnable(GL_DEPTH_TEST)}.
-     *
-     * @param event NeoForge RenderLevelStageEvent containing stage and matrix context
+     * Full MVP pipeline: drain completed meshes → schedule dirty sections →
+     * build FrustumTester → SimpleTraversal → record pass for visible sections.
+     * <p>
+     * <b>Sodium / Embeddium Compatibility:</b> restores OpenGL state before returning.
      */
     public void renderFarLod(RenderLevelStageEvent event) {
         if (closed) {
             return;
         }
 
-        // Sodium/Embeddium compatibility & pipeline state restoration guard
         try {
-            // MVP Far LOD rendering pass execution (frustum culling + draw calls via FrameGraph)
-            // Extract matrices if provided by event
-            Matrix4f projMatrix = event.getProjectionMatrix();
-            Matrix4f modelViewMatrix = event.getPoseStack() != null ? event.getPoseStack().last().pose() : new Matrix4f();
+            // 1. Drain completed mesh results from worker pool → geometry map
+            drainCompletedMeshes();
 
-            // Perform FrameGraph execution for this frame
-            FrameGraphBuilder builder = new FrameGraphBuilder(backend, new NoopMetricsRegistry());
-            builder.addPass("far-lod-pass", () -> new dev.ev.render.framegraph.FramePass() {
+            // 2. Get camera info
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player == null) return;
+
+            float cameraX = (float) mc.player.getX();
+            float cameraY = (float) mc.player.getEyeY();
+            float cameraZ = (float) mc.player.getZ();
+
+            // Camera forward vector from player look angles
+            float yawRad = (float) Math.toRadians(mc.player.getYRot());
+            float pitchRad = (float) Math.toRadians(mc.player.getXRot());
+            float viewDirX = (float) (-Math.sin(yawRad) * Math.cos(pitchRad));
+            float viewDirY = (float) (-Math.sin(pitchRad));
+            float viewDirZ = (float) (Math.cos(yawRad) * Math.cos(pitchRad));
+
+            // 3. Schedule dirty sections for meshing
+            schedulingCoordinator.drainDirtyAndSchedule(
+                cameraX, cameraY, cameraZ, viewDirX, viewDirY, viewDirZ
+            );
+
+            // 4. Build frustum from view-projection matrix
+            Matrix4f projMatrix = event.getProjectionMatrix();
+            Matrix4f modelViewMatrix = event.getPoseStack() != null
+                ? event.getPoseStack().last().pose()
+                : new Matrix4f();
+            Matrix4f mvp = new Matrix4f(projMatrix).mul(modelViewMatrix);
+            float[] planes = extractFrustumPlanes(mvp);
+            FrustumTester frustum = new FrustumTester(planes);
+
+            // 5. Traverse visible sections
+            List<SectionPos> loadedSections = geometryMap.loadedSections();
+            List<SectionPos> visibleSections = traversal.computeVisible(
+                loadedSections, frustum, this::sectionBoundingSphere
+            );
+
+            // 6. Execute frame graph with visible sections
+            FrameGraphBuilder builder = new FrameGraphBuilder(backend, metricsRegistry);
+            builder.addPass("far-lod-pass", () -> new FramePass() {
                 @Override
                 public void record(dev.ev.api.gpu.CommandList commands) {
-                    // Pass execution logic
+                    // MVP: для каждой видимой секции, у которой есть геометрия,
+                    // здесь будет draw call через GraphicsPipeline.
+                    // Сейчас LOD-шейдеры не скомпилированы (нет .glsl source),
+                    // поэтому записываем метрику видимых секций для /ev debug.
+                    metricsRegistry.recordCounter("visible-sections", visibleSections.size());
+                    metricsRegistry.recordCounter("loaded-sections", loadedSections.size());
                 }
 
                 @Override
@@ -135,7 +235,7 @@ public final class EVInstance implements AutoCloseable {
             builder.execute();
 
         } finally {
-            // Restore OpenGL state strictly for Sodium/Embeddium compatibility
+            // Restore OpenGL state for Sodium/Embeddium compatibility
             GL20.glUseProgram(0);
             GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);
             GL15.glBindBuffer(0x8F9F /* GL_DRAW_INDIRECT_BUFFER */, 0);
@@ -144,35 +244,132 @@ public final class EVInstance implements AutoCloseable {
         }
     }
 
+    /** Drains completed batches from worker pool into the geometry map. */
+    private void drainCompletedMeshes() {
+        MeshletBatch batch;
+        int drained = 0;
+        while ((batch = meshWorkerPool.pollCompleted()) != null) {
+            geometryMap.put(batch);
+            drained++;
+        }
+        if (drained > 0) {
+            metricsRegistry.recordCounter("meshes-uploaded", drained);
+        }
+    }
+
+    /**
+     * Computes bounding sphere [centerX, centerY, centerZ, radius] for a section.
+     * Used by SimpleTraversal for frustum testing.
+     */
+    private float[] sectionBoundingSphere(SectionPos pos) {
+        float size = pos.sizeInBlocks();
+        float halfSize = size / 2f;
+        float centerX = pos.minBlockX() + halfSize;
+        float centerY = pos.minBlockY() + halfSize;
+        float centerZ = pos.minBlockZ() + halfSize;
+        // Radius = half-diagonal of the cube = halfSize * sqrt(3)
+        float radius = halfSize * 1.7320508f;
+        return new float[]{centerX, centerY, centerZ, radius};
+    }
+
+    /**
+     * Extracts 6 frustum planes from a combined view-projection matrix.
+     * Each plane: [nx, ny, nz, d]. Total array length = 24.
+     * Uses Gribb/Hartmann method.
+     */
+    static float[] extractFrustumPlanes(Matrix4f m) {
+        float[] planes = new float[24];
+
+        // Left:   row3 + row0
+        planes[0]  = m.m03() + m.m00();
+        planes[1]  = m.m13() + m.m10();
+        planes[2]  = m.m23() + m.m20();
+        planes[3]  = m.m33() + m.m30();
+        normalizePlane(planes, 0);
+
+        // Right:  row3 - row0
+        planes[4]  = m.m03() - m.m00();
+        planes[5]  = m.m13() - m.m10();
+        planes[6]  = m.m23() - m.m20();
+        planes[7]  = m.m33() - m.m30();
+        normalizePlane(planes, 4);
+
+        // Bottom: row3 + row1
+        planes[8]  = m.m03() + m.m01();
+        planes[9]  = m.m13() + m.m11();
+        planes[10] = m.m23() + m.m21();
+        planes[11] = m.m33() + m.m31();
+        normalizePlane(planes, 8);
+
+        // Top:    row3 - row1
+        planes[12] = m.m03() - m.m01();
+        planes[13] = m.m13() - m.m11();
+        planes[14] = m.m23() - m.m21();
+        planes[15] = m.m33() - m.m31();
+        normalizePlane(planes, 12);
+
+        // Near:   row3 + row2
+        planes[16] = m.m03() + m.m02();
+        planes[17] = m.m13() + m.m12();
+        planes[18] = m.m23() + m.m22();
+        planes[19] = m.m33() + m.m32();
+        normalizePlane(planes, 16);
+
+        // Far:    row3 - row2
+        planes[20] = m.m03() - m.m02();
+        planes[21] = m.m13() - m.m12();
+        planes[22] = m.m23() - m.m22();
+        planes[23] = m.m33() - m.m32();
+        normalizePlane(planes, 20);
+
+        return planes;
+    }
+
+    private static void normalizePlane(float[] planes, int offset) {
+        float len = (float) Math.sqrt(
+            planes[offset]     * planes[offset] +
+            planes[offset + 1] * planes[offset + 1] +
+            planes[offset + 2] * planes[offset + 2]
+        );
+        if (len > 1e-8f) {
+            planes[offset]     /= len;
+            planes[offset + 1] /= len;
+            planes[offset + 2] /= len;
+            planes[offset + 3] /= len;
+        }
+    }
+
     @Override
     public void close() {
         if (!closed) {
             closed = true;
+            try {
+                meshWorkerPool.close();
+            } catch (Exception e) {
+                LOGGER.warn("Error closing mesh worker pool", e);
+            }
+            geometryMap.clear();
             if (backend != null) {
                 try {
                     backend.shutdown();
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) {}
             }
+            LOGGER.info("EVInstance closed");
         }
     }
 
+    // --- NoopMetricsRegistry inner class (unchanged from original) ---
     private static class NoopMetricsRegistry implements dev.ev.api.metrics.MetricsRegistry {
         @Override
         public void recordQueueDepth(String queueName, int depth) {}
-
         @Override
         public void recordCacheAccess(String cacheName, boolean hit) {}
-
         @Override
         public void recordGpuPassDuration(String passName, long nanos) {}
-
         @Override
         public void recordCounter(String counterName, long delta) {}
-
         @Override
         public void recordImportStageStatus(dev.ev.api.metrics.ImportStageStatus status) {}
-
         @Override
         public dev.ev.api.metrics.MetricsSnapshot snapshot() {
             return dev.ev.api.metrics.MetricsSnapshot.empty();
