@@ -39,7 +39,7 @@
 - [x] **28-neoforge-config** — Конфигурация мода
 - [x] **29-neoforge-commands** — Команды управления
 - [x] **30-test-fake-render-backend** — FakeRenderBackend тесты
-- [ ] **31-integration-checklist-mvp** — Сборка и проверка MVP
+- [x] **31-integration-checklist-mvp** — Сборка и проверка MVP
 
 ### Этап 4: Профилирование (Чекпоинт P0)
 - [ ] **P0-profiling-checkpoint** — Замеры холодного старта, FPS и задержек
@@ -1395,5 +1395,207 @@ openjdk-21-jdk-headless` падает на том же 404 с `security.ubuntu.c
 строка classifier per OS/arch не проверена реальным резолвом зависимостей Gradle в этой
 песочнице, это непроверенное допущение по аналогии с общепринятым LWJGL-Gradle
 паттерном.
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 11 — Отсутствующий класс `GLFenceHandle` (2026-08-19)
+
+**Симптом (реальный `./gradlew build` пользователя, Windows)**:
+```
+:ev-gpu:compileJava FAILED
+GLRenderBackend.java:177: error: cannot find symbol
+        return new GLFenceHandle(syncHandle);
+GLRenderBackend.java:210: error: cannot find symbol
+        if (!(fence instanceof GLFenceHandle glFence)) {
+symbol:   class GLFenceHandle
+```
+
+**Причина**: `GLRenderBackend` (`dev.ev.gpu.gl`) уже реализует `insertFence`/`isSignaled`/
+`waitForFence` через обёртку `GLFenceHandle implements FenceHandle` (см. class Javadoc
+`GLRenderBackend` — сам код относит эту реализацию к тикету 31, integration checklist),
+но файл `GLFenceHandle.java` отсутствовал в репозитории целиком — ни в `ev-gpu`, ни в
+любом другом модуле. Код, использующий класс, был написан, сам класс — нет.
+
+**Исправление**: добавлен `ev-gpu/src/main/java/dev/ev/gpu/gl/GLFenceHandle.java` —
+`public record GLFenceHandle(long syncHandle) implements FenceHandle {}`, минимальная
+обёртка над native GL sync handle, по образцу существующих `GLBuffer`/`GLTexture` в том
+же пакете. Остальной код `GLRenderBackend.java` не менялся — сигнатура конструктора
+(`new GLFenceHandle(syncHandle)`, один `long`-параметр) и метод доступа
+(`glFence.syncHandle()`) уже однозначно определяли форму недостающего класса.
+
+**Найденная попутно рассинхронизация `PROJECT_INDEX.md`**: таблица "Статус тикетов"
+отмечала `31-integration-checklist (mvp/full)` как `NOT_STARTED`, при этом Javadoc самого
+`GLRenderBackend` прямо говорит, что `submit`/`insertFence`/`isSignaled`/`waitForFence`/
+`shutdown` реализованы в рамках тикета 31. Раздел "Чего пока не существует" аналогично
+всё ещё говорил, что эти 5 методов — "заглушки на тикеты 19-23". Оба места исправлены
+согласованно с "Модульной картой" (см. запись `ev-gpu` в PROJECT_INDEX.md) — тикет 31
+отмечен `DONE (partial — только GLRenderBackend fence/submit/shutdown wiring)`, так как
+остальной объём full integration checklist (worker thread pool и т.п.) этим исправлением
+не проверялся.
+
+**Компиляция/тесты не прогнаны в этой сессии** — по-прежнему нет доступа к Gradle/JDK в
+песочнице (см. предыдущие багфиксы). Исправление сверено построчно с фактическим
+использованием класса в `GLRenderBackend.java` (конструктор с одним `long`-аргументом,
+`instanceof`-паттерн с вызовом `.syncHandle()`), не по памяти. **Требует подтверждения
+пользователем через `./gradlew build`** — это тот же билд, который изначально показал
+ошибку.
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 12 — Отсутствующая зависимость `org.slf4j` в `ev-render` (2026-08-19)
+
+**Симптом (реальный `./gradlew build` пользователя, Windows)**:
+```
+:ev-render:compileJava FAILED
+MeshWorkerPool.java:11: error: package org.slf4j does not exist
+import org.slf4j.Logger;
+MeshWorkerPool.java:12: error: package org.slf4j does not exist
+import org.slf4j.LoggerFactory;
+MeshWorkerPool.java:36: error: cannot find symbol
+    private static final Logger LOGGER = LoggerFactory.getLogger(MeshWorkerPool.class);
+4 errors
+```
+
+Отмечу: `ev-gpu` на этот раз скомпилировался успешно (`Task :ev-gpu:compileJava` без
+ошибок) — багфикс 11 (`GLFenceHandle`) подтверждён реальным билдом.
+
+**Причина**: `MeshWorkerPool` (`dev.ev.render.scheduling`) логирует через
+`org.slf4j.Logger`/`LoggerFactory`, но `ev-render/build.gradle.kts` не объявлял
+зависимость на `org.slf4j:slf4j-api` вовсе. В отличие от `ev-neoforge` (единственного
+другого модуля, использующего slf4j, во всех классах `dev.ev.neoforge.*`), которому
+slf4j-api достаётся транзитивно через classpath NeoForge/Minecraft (плагин
+`net.neoforged.moddev`), `ev-render` — обычный `java-library` модуль без такого
+транзитивного источника: явную зависимость никто не добавил.
+
+**Исправление**: в `ev-render/build.gradle.kts` добавлена
+`api("org.slf4j:slf4j-api:2.0.9")` — версия зафиксирована той же, что уже используется в
+`ev-neoforge/build.gradle.kts` (`testRuntimeOnly("org.slf4j:slf4j-simple:2.0.9")`), чтобы
+в проекте не появлялось две разных версии slf4j на classpath. `api`, а не
+`implementation`, — тип `Logger` потенциально виден через публичный API этого модуля в
+будущем, и `ev-neoforge` (реальный consumer на рантайме) должен получить реальный
+slf4j-api jar транзитивно. На реальном рантайме (запуск игры, не просто компиляция)
+slf4j получит provider не из этой зависимости, а из бандла log4j-slf4j2-impl, который
+поставляет сам NeoForge — эта зависимость закрывает только compile-classpath `ev-render`.
+
+**Найденная попутно рассинхронизация `PROJECT_INDEX.md`**: модульная карта (раздел
+"Модульная карта") для `ev-render` перечисляла только пакеты `dev.ev.render.culling`,
+`dev.ev.render.framegraph`, `dev.ev.render.dirty` — пакет `dev.ev.render.scheduling`
+(7 классов: `MeshWorkerPool`, `MeshTask`, `MeshingPipelineRunner`,
+`MeshSchedulingCoordinator`, `SectionGeometryMap`, `SimpleMeshingContext`,
+`SectionGenerationPolicy`) в файле не упоминался вовсе — не в одном из четырёх согласуемых
+разделов. Судя по содержанию (worker thread pool, дренирующий `MeshTaskQueue`), это,
+по-видимому, реализация как раз того недостающего явного создания worker thread pool,
+о котором `EV_SESSION_PROMPT.md` прямо предупреждает применительно к тикетам
+31-mvp/-full. Добавлена запись в "Модульную карту" (см. `ev-render`), но **детальная
+построчная сверка каждого из 7 классов этого пакета с текстом тикетов не проводилась** —
+это выходит за рамки текущего багфикса про slf4j и остаётся отдельной задачей для
+следующей сессии (в частности, разделы "Ключевые классы" и "Чего пока не существует"
+всё ещё не обновлены для этого пакета — если следующая сессия трогает `ev-render`, ей
+нужно будет закрыть и это, не только добавленную здесь строку в модульной карте).
+
+**Компиляция/тесты не прогнаны в этой сессии** — по-прежнему нет доступа к Gradle/JDK в
+песочнице. Исправление — точечное добавление одной Gradle-зависимости, сверенное с уже
+работающим паттерном `ev-neoforge` (тот же slf4j-api provider на рантайме, та же
+зафиксированная версия). Остальные импорты/вызовы в `MeshWorkerPool.java` вручную сверены
+с фактическими сигнатурами `SectionCache.acquire`, `MeshTaskQueue.pollNonBlocking`,
+`MeshingPipelineRunner.build`, `GeometryChangeDeduplicator.hashQuads`/
+`recordAndCheckChanged`, `MeshletBatch.meshlets()` — расхождений не найдено, только
+недостающая Gradle-зависимость была причиной ошибки компиляции. **Требует подтверждения
+пользователем через `./gradlew build`**.
+
+`PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 13 — `ev-neoforge:test` без Minecraft/NeoForge classpath (2026-08-19)
+
+**Симптом (реальный `./gradlew build` пользователя, Windows)**:
+```
+> Task :ev-neoforge:test FAILED
+
+EVInstanceTest > calculateNearCutoffBlocks guarantees coverage of square vanilla loading
+diagonal (>= renderDistanceChunks * 16 * sqrt(2)) FAILED
+    java.lang.NoClassDefFoundError at EVInstanceTest.java:17
+        Caused by: java.lang.ClassNotFoundException at EVInstanceTest.java:17
+
+13 tests completed, 1 failed
+```
+
+Отмечу: и `ev-render`, и `ev-neoforge` теперь **компилируются** успешно (`:ev-render:
+compileJava`, `:ev-neoforge:compileJava` — оба без ошибок) — багфикс 12 (slf4j-api в
+ev-render) подтверждён реальным билдом. Впервые дошли до стадии `:ev-neoforge:test`;
+12 из 13 тестов модуля прошли, упал только один.
+
+**Причина**: `EVInstanceTest.testCalculateNearCutoffBlocksCircumscribesSquare` вызывает
+всего лишь статический метод `EVInstance.calculateNearCutoffBlocks(...)` — сам тест не
+импортирует ни одного класса Minecraft/NeoForge. Но при загрузке JVM класса `EVInstance`
+верификация байткода резолвит типы, на которые ссылается класс **целиком** (в любых его
+методах, не только вызываемом), а `EVInstance.java` импортирует `net.minecraft.client.
+Minecraft`, `net.minecraft.client.multiplayer.ClientLevel`,
+`net.neoforged.neoforge.client.event.RenderLevelStageEvent` (для реальной интеграции с
+рендер-циклом игры — тикет 27). Два других тестовых класса модуля (`EVConfigTest`,
+`MetricsSnapshotFormatterTest`), которые до сих пор проходили, тестируют классы (`EVConfig`,
+`MetricsSnapshotFormatter`) без единого импорта Minecraft/NeoForge — поэтому раньше эта
+проблема не проявлялась ни разу. Корень: `ev-neoforge/build.gradle.kts` не содержал блок
+`neoForge { unitTest { enable(); testedMod = ... } }`, обязательный (по официальному README
+ModDevGradle, https://github.com/neoforged/ModDevGradle) для того, чтобы task `test` вообще
+получил Minecraft/NeoForge classpath на рантайме — без него `test` компилируется нормально
+(`compileTestJava` не падает — Minecraft-типы видны на compile classpath через сам плагин),
+но не запускается с тем же classpath.
+
+**Исправление**: в `ev-neoforge/build.gradle.kts`:
+1. Добавлен блок `neoForge { unitTest { enable(); testedMod = mods[property("mod_id")
+   as String] } }` сразу после существующего блока `mods { ... }` — паттерн 1-в-1 из
+   официального README ModDevGradle (verified via web search, не по памяти: `neoForge {
+   unitTest { enable(); testedMod = mods.<name> } }`).
+2. Добавлен `testRuntimeOnly("org.junit.platform:junit-platform-launcher")` — README
+   явно перечисляет эту зависимость как часть минимальной настройки JUnit-поддержки
+   ModDevGradle, отсутствовала в файле. `useJUnitPlatform()` уже был настроен глобально
+   в корневом `build.gradle.kts` (`tasks.withType<Test> { useJUnitPlatform() }`), трогать
+   не потребовалось.
+
+**Не проверено фактическим Gradle-резолвом**: синтаксис `mods[property("mod_id") as
+String]` (индексный доступ к `NamedDomainObjectContainer` в Kotlin DSL) — по документации
+и обычному Kotlin DSL API это должно резолвиться в `mods.getByName(...)`, но сама сборка
+`neoForge.unitTest` block API (какие именно свойства/методы существуют на объекте
+`unitTest { }`, кроме `enable()`/`testedMod`) не была верифицирована построчно против
+исходников плагина `net.neoforged.moddev` версии, зафиксированной в этом проекте — только
+против примера в README, который может отражать другую версию плагина. **Требует
+подтверждения пользователем через `./gradlew build`** — это тот же билд, который показал
+ошибку изначально; если синтаксис `unitTest {}` не совпадёт с версией плагина 2.0.141
+(см. `moddevgradle_version` в `gradle.properties`), это будет новая ошибка конфигурации
+Gradle, а не компиляции/тестов.
+
+`PROJECT_INDEX.md` не обновлялся в рамках этого багфикса — изменение затрагивает только
+`ev-neoforge/build.gradle.kts` (Gradle-конфигурацию тестового рантайма), не код и не
+модульную карту `ev-neoforge` (`EVInstance` и остальные классы модуля были и остаются на
+своих местах, ничего не создано/не удалено). `PROGRESS.md` обновлён.
+
+### Багфикс 13 (подтверждение) — `BUILD SUCCESSFUL` реальным билдом (2026-08-19)
+
+Пользователь прогнал `./gradlew build` после трёх багфиксов этой сессии (11 — `GLFenceHandle`,
+12 — slf4j-api в `ev-render`, 13 — `neoForge.unitTest` в `ev-neoforge`). Результат:
+
+```
+> Task :ev-neoforge:test
+> Task :ev-neoforge:check
+> Task :ev-neoforge:build
+
+BUILD SUCCESSFUL in 8s
+36 actionable tasks: 2 executed, 34 up-to-date
+```
+
+Все модули (`ev-api`, `ev-storage`, `ev-meshing`, `ev-gpu`, `ev-render`, `ev-test`,
+`ev-neoforge`) компилируются, все тесты во всех модулях проходят, включая ранее падавший
+`EVInstanceTest` в `ev-neoforge`. Это закрывает **тикет 31-integration-checklist-mvp**
+целиком (чекбокс переведён в `[x]`) — весь набор MVP-тикетов Волны 1 теперь собирается и
+проходит тесты единым Gradle-билдом, без ручного вмешательства, кроме трёх точечных
+багфиксов этой сессии (документированы отдельно как багфиксы 11-13 выше).
+
+**Что это НЕ подтверждает**: сам факт `BUILD SUCCESSFUL` — это компиляция + юнит-тесты,
+не запуск игры. Мод ни разу не был реально запущен (`runClient`) и не тестировался
+визуально/интерактивно в этой сессии — это следующий шаг по `README.md`/`MVP_INDEX.md`:
+"ЗАПУСТИ, ПОИГРАЙ, ЗАМЕРЬ" перед `P0-profiling-checkpoint.md`. Требует действий
+пользователя за пределами Gradle-билда (реальный `runClient`, реальный мир, ручное
+наблюдение) — не может быть выполнено в этой песочнице (нет GPU/display, нет доступа
+к интерактивному игровому клиенту).
 
 `PROJECT_INDEX.md` и `PROGRESS.md` обновлены.

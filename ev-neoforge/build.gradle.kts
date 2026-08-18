@@ -58,6 +58,20 @@ neoForge {
             sourceSet(sourceSets.main.get())
         }
     }
+
+    // Без этого блока `test` source set компилируется (ev-neoforge:compileTestJava успешен),
+    // но у task'а `test` при рантайме нет Minecraft/NeoForge classpath'а — любой тестовый
+    // класс, вызывающий метод класса, который сам (в любом *другом* своём методе, не
+    // обязательно вызываемом тестом) ссылается на net.minecraft.*/net.neoforged.neoforge.*
+    // (здесь — EVInstance, из-за импортов Minecraft/ClientLevel/RenderLevelStageEvent),
+    // падает с NoClassDefFoundError/ClassNotFoundException при загрузке класса — верификация
+    // байткода JVM резолвит все типы, на которые ссылается класс, не только вызываемый метод.
+    // Официальный паттерн ModDevGradle для JUnit-тестов, ссылающихся на Minecraft-классы —
+    // именно `unitTest { enable(); testedMod = mods.<name> }` (см. README ModDevGradle).
+    unitTest {
+        enable()
+        testedMod = mods[property("mod_id") as String]
+    }
 }
 
 sourceSets.main.get().resources.srcDir("src/generated/resources")
@@ -71,6 +85,7 @@ dependencies {
 
     testImplementation(platform("org.junit:junit-bom:${property("junit_version")}"))
     testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testRuntimeOnly("org.slf4j:slf4j-simple:2.0.9")
 }
 
