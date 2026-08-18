@@ -2,6 +2,7 @@ package dev.ev.render.framegraph;
 
 import dev.ev.api.gpu.BarrierScope;
 import dev.ev.api.gpu.CommandList;
+import dev.ev.api.gpu.CommandListFactory;
 import dev.ev.api.gpu.RenderBackend;
 import dev.ev.api.metrics.MetricsRegistry;
 
@@ -194,7 +195,15 @@ public final class FrameGraphBuilder {
         }
 
         // 4. Record and Submit Commands
-        RecordingCommandList cmdList = new RecordingCommandList();
+        // If the backend can vend a real CommandList (ticket 31's CommandListFactory —
+        // see that interface's Javadoc for why this check exists), forward every
+        // recorded operation to it so passes actually do something on the GPU, not just
+        // bookkeeping. Backends without this capability (e.g. FrameGraphBuilderTest's
+        // TestRenderBackend) fall back to the original record-only behavior.
+        CommandList delegate = (backend instanceof CommandListFactory factory)
+                ? factory.newCommandList()
+                : null;
+        RecordingCommandList cmdList = new RecordingCommandList(delegate);
 
         for (PassNode node : sortedOrder) {
             if (requiresBarrierBefore.contains(node)) {
