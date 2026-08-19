@@ -7,7 +7,6 @@ import dev.ev.api.meshing.MeshletBatch;
 import dev.ev.gpu.gl.GLRenderBackend;
 import dev.ev.meshing.queue.MeshTaskQueue;
 import dev.ev.neoforge.adapter.BlockPalette;
-import dev.ev.neoforge.adapter.MinecraftHeightmapSource;
 import dev.ev.neoforge.config.EVConfig;
 import dev.ev.neoforge.config.EVConfigLoader;
 import dev.ev.render.culling.FrustumTester;
@@ -26,9 +25,7 @@ import dev.ev.render.scheduling.SimpleMeshingContext;
 import dev.ev.storage.cache.InMemorySectionLoader;
 import dev.ev.storage.cache.LruEvictionPolicy;
 import dev.ev.storage.cache.SectionCache;
-import dev.ev.storage.coarsegen.CoarseSectionGenerator;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
@@ -77,6 +74,7 @@ public final class EVInstance implements AutoCloseable {
     // Render-time state
     private final SimpleTraversal traversal;
     private final SectionGeometryMap geometryMap;
+    private final FarLodPassRenderer FarLodPassRenderer;
 
     private boolean closed = false;
     private volatile boolean debugOverlayEnabled = false;
@@ -116,6 +114,7 @@ public final class EVInstance implements AutoCloseable {
         // Render-time state
         this.traversal = new SimpleTraversal(metricsRegistry);
         this.geometryMap = new SectionGeometryMap();
+        this.FarLodPassRenderer = new FarLodPassRenderer(backend);
     }
 
     /**
@@ -218,14 +217,21 @@ public final class EVInstance implements AutoCloseable {
             );
 
             // 6. Execute frame graph with visible sections
+            float[] viewProjColumnMajor = new float[16];
+            mvp.get(viewProjColumnMajor);
+
             FrameGraphBuilder builder = new FrameGraphBuilder(backend, metricsRegistry);
             builder.addPass("far-lod-pass", () -> new FramePass() {
                 @Override
                 public void record(dev.ev.api.gpu.CommandList commands) {
-                    // MVP: для каждой видимой секции, у которой есть геометрия,
-                    // здесь будет draw call через GraphicsPipeline.
-                    // Сейчас LOD-шейдеры не скомпилированы (нет .glsl source),
-                    // поэтому записываем метрику видимых секций для /ev debug.
+                    // MVP draw: each visible section is rendered as a unit cube
+                    // (vertex-pulling from a Node storage buffer, no real meshlet
+                    // geometry yet — see FarLodPassRenderer's Javadoc) to prove the
+                    // draw path actually produces visible geometry on screen.
+                    FarLodPassRenderer.record(
+                            commands, visibleSections, EVInstance.this::sectionBoundingSphere,
+                            viewProjColumnMajor);
+
                     metricsRegistry.recordCounter("visible-sections", visibleSections.size());
                     metricsRegistry.recordCounter("loaded-sections", loadedSections.size());
                 }
@@ -365,6 +371,11 @@ public final class EVInstance implements AutoCloseable {
                 LOGGER.warn("Error closing mesh worker pool", e);
             }
             geometryMap.clear();
+            try {
+                FarLodPassRenderer.close();
+            } catch (Exception e) {
+                LOGGER.warn("Error closing FarLodPassRenderer", e);
+            }
             if (backend != null) {
                 try {
                     backend.shutdown();

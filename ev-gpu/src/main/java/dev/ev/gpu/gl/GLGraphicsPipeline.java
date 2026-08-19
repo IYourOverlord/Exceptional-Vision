@@ -7,7 +7,9 @@ import dev.ev.api.gpu.PipelineLayout;
 
 import org.lwjgl.opengl.GL45;
 import org.lwjgl.opengl.ARBIndirectParameters;
+import org.lwjgl.system.MemoryStack;
 
+import java.nio.FloatBuffer;
 import java.util.Map;
 
 /**
@@ -43,12 +45,32 @@ public final class GLGraphicsPipeline implements GraphicsPipeline {
 
     @Override
     public void drawIndirectCount(GpuBuffer indirectBuffer, long offsetBytes, GpuBuffer countBuffer,
-                                   long countOffsetBytes, int maxDrawCount) {
+                                  long countOffsetBytes, int maxDrawCount) {
         GL45.glUseProgram(programHandle);
         GL45.glBindBuffer(GL45.GL_DRAW_INDIRECT_BUFFER, ((GLBuffer) indirectBuffer).handle());
         GL45.glBindBuffer(ARBIndirectParameters.GL_PARAMETER_BUFFER_ARB, ((GLBuffer) countBuffer).handle());
         ARBIndirectParameters.glMultiDrawArraysIndirectCountARB(GL45.GL_TRIANGLES, offsetBytes, countOffsetBytes,
-            maxDrawCount, 0);
+                maxDrawCount, 0);
+    }
+
+    /**
+     * MVP-only helper (not part of the {@link GraphicsPipeline} contract): binds this
+     * program and uploads a 4x4 column-major matrix to uniform location 0. The
+     * {@code GraphicsPipeline}/{@code PipelineLayout} contract (ticket 04) has no notion
+     * of plain uniform values, only named buffer/texture bindings — this is a stopgap
+     * for {@code far-lod-pass}'s view-projection matrix until a proper uniform-binding
+     * mechanism is designed. Callers must cast to this concrete class to use it, which
+     * is intentional: it signals this is a temporary, backend-specific escape hatch.
+     *
+     * @param columnMajor16 16 floats, column-major 4x4 matrix
+     */
+    public void useProgramAndSetViewProj(float[] columnMajor16) {
+        GL45.glUseProgram(programHandle);
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            FloatBuffer buf = stack.mallocFloat(16);
+            buf.put(columnMajor16).flip();
+            GL45.glUniformMatrix4fv(0, false, buf);
+        }
     }
 
     @Override
@@ -76,8 +98,8 @@ public final class GLGraphicsPipeline implements GraphicsPipeline {
         Integer bindingPoint = bindingsByName.get(bindingName);
         if (bindingPoint == null) {
             throw new IllegalArgumentException(
-                "No binding named '" + bindingName + "' in this pipeline's layout; known bindings: "
-                    + bindingsByName.keySet());
+                    "No binding named '" + bindingName + "' in this pipeline's layout; known bindings: "
+                            + bindingsByName.keySet());
         }
         return bindingPoint;
     }
