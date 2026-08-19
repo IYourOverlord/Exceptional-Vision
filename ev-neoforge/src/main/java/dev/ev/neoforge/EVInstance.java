@@ -9,6 +9,7 @@ import dev.ev.meshing.queue.MeshTaskQueue;
 import dev.ev.neoforge.adapter.BlockPalette;
 import dev.ev.neoforge.config.EVConfig;
 import dev.ev.neoforge.config.EVConfigLoader;
+import dev.ev.neoforge.FarLodPassRenderer;
 import dev.ev.render.culling.FrustumTester;
 import dev.ev.render.culling.SimpleTraversal;
 import dev.ev.render.dirty.DirtySectionTracker;
