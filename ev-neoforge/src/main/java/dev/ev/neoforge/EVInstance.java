@@ -34,6 +34,7 @@ import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL20;
+import org.lwjgl.opengl.GL45;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,6 +52,8 @@ import java.util.Objects;
 public final class EVInstance implements AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(EVInstance.class);
+
+    private boolean glErrorLoggedOnce = false;
 
     private final RenderBackend backend;
     private final MetricsRegistry metricsRegistry;
@@ -85,10 +88,10 @@ public final class EVInstance implements AutoCloseable {
 
         // Storage subsystem
         this.sectionCache = new SectionCache(
-            1, // shardCountPowerOfTwo ignored in MVP impl
-            new InMemorySectionLoader(),
-            new LruEvictionPolicy(),
-            metricsRegistry
+                1, // shardCountPowerOfTwo ignored in MVP impl
+                new InMemorySectionLoader(),
+                new LruEvictionPolicy(),
+                metricsRegistry
         );
         this.blockPalette = new BlockPalette();
         this.generationPolicy = new SectionGenerationPolicy();
@@ -98,12 +101,12 @@ public final class EVInstance implements AutoCloseable {
         this.pipelineRunner = new MeshingPipelineRunner();
         this.deduplicator = new GeometryChangeDeduplicator();
         this.meshWorkerPool = new MeshWorkerPool(
-            config.workerThreadCount(),
-            meshTaskQueue,
-            sectionCache,
-            pipelineRunner,
-            deduplicator,
-            SimpleMeshingContext.INSTANCE
+                config.workerThreadCount(),
+                meshTaskQueue,
+                sectionCache,
+                pipelineRunner,
+                deduplicator,
+                SimpleMeshingContext.INSTANCE
         );
 
         // Dirty tracking & scheduling
@@ -196,14 +199,14 @@ public final class EVInstance implements AutoCloseable {
 
             // 3. Schedule dirty sections for meshing
             schedulingCoordinator.drainDirtyAndSchedule(
-                cameraX, cameraY, cameraZ, viewDirX, viewDirY, viewDirZ
+                    cameraX, cameraY, cameraZ, viewDirX, viewDirY, viewDirZ
             );
 
             // 4. Build frustum from view-projection matrix
             Matrix4f projMatrix = event.getProjectionMatrix();
             Matrix4f modelViewMatrix = event.getPoseStack() != null
-                ? event.getPoseStack().last().pose()
-                : new Matrix4f();
+                    ? event.getPoseStack().last().pose()
+                    : new Matrix4f();
             Matrix4f mvp = new Matrix4f(projMatrix).mul(modelViewMatrix);
             float[] planes = extractFrustumPlanes(mvp);
             FrustumTester frustum = new FrustumTester(planes);
@@ -211,7 +214,7 @@ public final class EVInstance implements AutoCloseable {
             // 5. Traverse visible sections
             List<SectionPos> loadedSections = geometryMap.loadedSections();
             List<SectionPos> visibleSections = traversal.computeVisible(
-                loadedSections, frustum, this::sectionBoundingSphere
+                    loadedSections, frustum, this::sectionBoundingSphere
             );
 
             // 6. Execute frame graph with visible sections
@@ -238,9 +241,22 @@ public final class EVInstance implements AutoCloseable {
             // Restore OpenGL state for Sodium/Embeddium compatibility
             GL20.glUseProgram(0);
             GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);
-            GL15.glBindBuffer(0x8F9F /* GL_DRAW_INDIRECT_BUFFER */, 0);
+            GL15.glBindBuffer(GL45.GL_DRAW_INDIRECT_BUFFER, 0);
             GL11.glDepthMask(true);
             GL11.glEnable(GL11.GL_DEPTH_TEST);
+
+            // One-time GL error check to catch regressions like the invalid-enum
+            // bug that used to live here (was hardcoded as 0x8F9F instead of
+            // GL_DRAW_INDIRECT_BUFFER = 0x8F3F). Logged once, not per-frame,
+            // to avoid flooding the log if a new GL error appears.
+            if (!glErrorLoggedOnce) {
+                int glError = GL11.glGetError();
+                if (glError != GL11.GL_NO_ERROR) {
+                    LOGGER.error("GL error 0x{} detected in EVInstance frame cleanup (finally block)",
+                            Integer.toHexString(glError));
+                    glErrorLoggedOnce = true;
+                }
+            }
         }
     }
 
@@ -327,9 +343,9 @@ public final class EVInstance implements AutoCloseable {
 
     private static void normalizePlane(float[] planes, int offset) {
         float len = (float) Math.sqrt(
-            planes[offset]     * planes[offset] +
-            planes[offset + 1] * planes[offset + 1] +
-            planes[offset + 2] * planes[offset + 2]
+                planes[offset]     * planes[offset] +
+                        planes[offset + 1] * planes[offset + 1] +
+                        planes[offset + 2] * planes[offset + 2]
         );
         if (len > 1e-8f) {
             planes[offset]     /= len;
