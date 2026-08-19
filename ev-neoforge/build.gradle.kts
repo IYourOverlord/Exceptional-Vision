@@ -77,11 +77,37 @@ neoForge {
 sourceSets.main.get().resources.srcDir("src/generated/resources")
 
 dependencies {
+    // ВАЖНО: обычный implementation(project(":...")) на sibling-подпроект компилирует
+    // ev-neoforge (класс-типы видны на compile classpath через Gradle project-зависимость),
+    // но НЕ добавляет классы этого подпроекта на РАНТАЙМ-classpath реальной запущенной игры.
+    // FML грузит на classpath рантайма только (а) сами моды (jar с META-INF/neoforge.mods.
+    // toml) и (б) явно embedded jarJar-зависимости — обычная project-зависимость не
+    // подпадает ни под один из этих случаев. Без jarJar игра запускается и даже проходит
+    // экран загрузки модов (jar с META-INF/neoforge.mods.toml валиден), но крашится в
+    // рантайме с NoClassDefFoundError на первом же классе из ev-api/ev-storage/ev-meshing/
+    // ev-gpu/ev-render (в этой сессии — dev.ev.api.metrics.MetricsRegistry при загрузке
+    // мира, EV.onLevelLoad).
+    //
+    // Официальный синтаксис для subproject-ов (README ModDevGradle, раздел "Jar-in-Jar" →
+    // "Subprojects") — именно `jarJar project(":subproject")`, БЕЗ обёртки в
+    // implementation(...): "For subprojects, the group id is the root project name, while
+    // the artifact id is the name of the subproject" — FML сам определяет group/artifact
+    // id и генерирует нужный module name для embedded подпроектов, никакого ручного
+    // FMLModType-манифеста не требуется (та инструкция в README — для отдельного source
+    // set "plugin", не для обычных sibling-подпроектов). Обычный implementation(project(
+    // ...)) оставлен рядом — jarJar НЕ гарантирует compile-classpath видимость сам по себе,
+    // это две независимые задачи (compile-time и runtime-embedding), закрываемые raздельно.
     implementation(project(":ev-api"))
     implementation(project(":ev-storage"))
     implementation(project(":ev-meshing"))
     implementation(project(":ev-gpu"))
     implementation(project(":ev-render"))
+
+    jarJar(project(":ev-api"))
+    jarJar(project(":ev-storage"))
+    jarJar(project(":ev-meshing"))
+    jarJar(project(":ev-gpu"))
+    jarJar(project(":ev-render"))
 
     testImplementation(platform("org.junit:junit-bom:${property("junit_version")}"))
     testImplementation("org.junit.jupiter:junit-jupiter")

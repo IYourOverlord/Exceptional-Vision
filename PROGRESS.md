@@ -1599,3 +1599,74 @@ BUILD SUCCESSFUL in 8s
 к интерактивному игровому клиенту).
 
 `PROJECT_INDEX.md` и `PROGRESS.md` обновлены.
+
+### Багфикс 14 — Отсутствовал `jarJar` для sibling-подпроектов, краш в рантайме (2026-08-19)
+
+**Симптом (реальный запуск через отдельный лаунчер PrismLauncher, не `./gradlew runClient`,
+скопирован собранный `ev-neoforge/build/libs/ev-0.1.0-SNAPSHOT.jar` в `mods/`)**:
+
+Мод успешно проходит экран загрузки модов (валидный `neoforge.mods.toml` внутри jar — это
+подтверждает, что предыдущий баг с "not a valid mod file", описанный в отдельном обмене
+этой же сессии, был на самом деле путаницей пользователя между корневым пустым jar
+(`build/libs/ev-0.1.0-SNAPSHOT.jar`, из `plugins { id("java") }` в корневом
+`build.gradle.kts`, `rootProject.name = "ev"`) и реальным jar мода (`ev-neoforge/build/
+libs/ev-0.1.0-SNAPSHOT.jar`, одинаковое имя файла в двух разных папках — задокументировано
+отдельно, не багфикс кода). После выбора правильного jar игра доходит до создания мира и
+крашится при загрузке уровня:
+
+```
+[Render thread/INFO] [dev.ev.neoforge.EV/]: Client level loaded, initializing EVInstance
+[Render thread/ERROR] [net.neoforged.bus.EventBus/EVENTBUS]: Exception caught during firing
+event: dev/ev/api/metrics/MetricsRegistry
+java.lang.NoClassDefFoundError: dev/ev/api/metrics/MetricsRegistry
+	at TRANSFORMER/ev@0.1.0-SNAPSHOT/dev.ev.neoforge.EV.onLevelLoad(EV.java:70)
+	...
+Caused by: java.lang.ClassNotFoundException: dev.ev.api.metrics.MetricsRegistry
+```
+
+**Причина**: `ev-neoforge/build.gradle.kts` объявлял зависимости на sibling-подпроекты
+(`ev-api`, `ev-storage`, `ev-meshing`, `ev-gpu`, `ev-render`) только через обычный
+`implementation(project(":..."))`. Это достаточно для *компиляции* — Gradle project-
+зависимость делает классы подпроекта видимыми на compile classpath, поэтому `./gradlew
+build` (весь набор багфиксов 11-13 этой сессии) успешно компилировался и проходил тесты.
+Но для *рантайма реальной запущенной игры* этого недостаточно: по документированному
+поведению FML/ModDevGradle (README ModDevGradle, раздел "Jar-in-Jar" — verified via web
+search, не по памяти), классы подгружаются на рантайм-classpath только из (а) jar-файлов,
+которые сами являются модами (имеют `META-INF/neoforge.mods.toml`), либо (б) jar-файлов,
+явно встроенных через `jarJar`. Обычная project-зависимость не подпадает ни под один
+случай — классы `ev-api`/`ev-storage`/`ev-meshing`/`ev-gpu`/`ev-render` были на classpath
+у Gradle во время сборки, но физически не попадали ни в собранный `ev-neoforge` jar, ни на
+classpath запущенного клиента игры.
+
+**Почему это не проявилось раньше**: все предыдущие багфиксы этой сессии (11-13) были
+верифицированы только через `./gradlew build` — компиляцию и юнит-тесты, — что этот класс
+дефектов принципиально не может поймать, так как compile classpath и runtime classpath
+запущенной игры собираются по разным правилам. Именно поэтому `EV_SESSION_PROMPT.md`/
+`README.md` явно требуют шаг "ЗАПУСТИ, ПОИГРАЙ, ЗАМЕРЬ" после Волны 1 — это первое реальное
+подтверждение того шага, и оно сразу выявило дефект, невидимый на уровне только сборки.
+
+**Исправление**: в `ev-neoforge/build.gradle.kts`, в блоке `dependencies { ... }`, добавлены
+`jarJar(project(":ev-api"))`, `jarJar(project(":ev-storage"))`, `jarJar(project(":ev-
+meshing"))`, `jarJar(project(":ev-gpu"))`, `jarJar(project(":ev-render"))` — синтаксис
+`jarJar(project(":subproject"))`, БЕЗ обёртки в `implementation(...)`, взят дословно из
+официального README ModDevGradle (раздел "Jar-in-Jar" → "Subprojects": `jarJar project(":
+coremod")` в Groovy DSL → `jarJar(project(":coremod"))` в Kotlin DSL, эквивалентный вызов
+конфигурации с аргументом). Существующие `implementation(project(":..."))` строки оставлены
+рядом, не удалены — jarJar встраивает jar в финальный артефакт для рантайма, но не
+гарантирует compile-classpath видимость сама по себе, это две независимые задачи.
+
+**Не проверено фактическим запуском в этой сессии** — по-прежнему нет GPU/display/
+интерактивного игрового клиента в песочнице. Само API `jarJar` (что конкретно генерирует
+FML для module name/group/artifact id встроенных подпроектов) сверено только с
+официальным README ModDevGradle, не с исходниками конкретно версии плагина 2.0.141,
+зафиксированной в `gradle.properties` (`moddevgradle_version=2.0.141`) — синтаксис в
+README относится к плагину версии `1.0.11` в примере базовой настройки этого же файла,
+могут быть недокументированные изменения API между мажорными версиями. **Требует
+подтверждения пользователем через пересборку (`./gradlew clean :ev-neoforge:build`) и
+повторный запуск игры** — если после этого фикса появится другая ошибка (например,
+связанная с конфликтом module name или дублированием пакетов между подпроектами, о чём
+предупреждает README), это следующий шаг диагностики, не повод откатывать это изменение.
+
+`PROJECT_INDEX.md` не обновлялся в рамках этого багфикса — изменение затрагивает только
+Gradle-конфигурацию runtime-classpath (`ev-neoforge/build.gradle.kts`), не код и не
+модульную карту. `PROGRESS.md` обновлён.
