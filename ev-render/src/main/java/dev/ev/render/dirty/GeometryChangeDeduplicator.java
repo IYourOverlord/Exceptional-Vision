@@ -15,6 +15,16 @@ import java.util.zip.CRC32;
  * write, GPU upload) when the geometry is byte-identical to what's already
  * resident — see this ticket's "Эмпирический урок" section for why this matters
  * in practice.
+ * <p>
+ * <b>Thread-safety:</b> a single instance of this class is shared across all
+ * {@code MeshWorkerPool} worker threads (created once in {@code EVInstance}).
+ * {@code Long2LongOpenHashMap} is not thread-safe — concurrent {@code put()}
+ * calls from different threads can race on internal resize/rehash, corrupting
+ * the backing array (observed as {@code ArrayIndexOutOfBoundsException} from
+ * concurrent puts). {@link #recordAndCheckChanged} is therefore fully
+ * synchronized: the read-then-write (get/put) sequence must be atomic anyway,
+ * since two threads finishing the same section concurrently would otherwise
+ * race on which hash "wins".
  */
 public final class GeometryChangeDeduplicator {
 
@@ -63,7 +73,7 @@ public final class GeometryChangeDeduplicator {
      * @return true if newHash differs from the last recorded hash or if the section is seen for the first time;
      *         false if the hash is identical to the previously recorded hash
      */
-    public boolean recordAndCheckChanged(SectionPos section, long newHash) {
+    public synchronized boolean recordAndCheckChanged(SectionPos section, long newHash) {
         Objects.requireNonNull(section, "section cannot be null");
         long encoded = section.encode();
         long prevHash = lastHashesByEncodedPos.get(encoded);
