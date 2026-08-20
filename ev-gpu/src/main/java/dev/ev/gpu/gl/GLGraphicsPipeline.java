@@ -29,16 +29,28 @@ public final class GLGraphicsPipeline implements GraphicsPipeline {
     private final int programHandle;
     private final Map<String, Integer> bindingsByName;
 
+    /**
+     * Empty (attribute-less) VAO, required by the Core Profile spec for any draw call even
+     * when geometry is generated procedurally in the vertex shader via vertex-pulling
+     * ({@code gl_VertexID}/{@code gl_InstanceID}) and no actual vertex buffer/attributes are
+     * bound. Without a bound VAO, {@code glMultiDrawArraysIndirect} etc. fail with
+     * {@code GL_INVALID_OPERATION} ("Array object is not active") and draw nothing — this is
+     * not optional even though this pipeline never populates it with attributes.
+     */
+    private final int dummyVao;
+
     private boolean freed;
 
     GLGraphicsPipeline(int programHandle, PipelineLayout layout) {
         this.programHandle = programHandle;
         this.bindingsByName = layout.bindingsByName();
+        this.dummyVao = GL45.glCreateVertexArrays();
     }
 
     @Override
     public void drawIndirect(GpuBuffer indirectBuffer, long offsetBytes, int drawCount) {
         GL45.glUseProgram(programHandle);
+        GL45.glBindVertexArray(dummyVao);
         GL45.glBindBuffer(GL45.GL_DRAW_INDIRECT_BUFFER, ((GLBuffer) indirectBuffer).handle());
         GL45.glMultiDrawArraysIndirect(GL45.GL_TRIANGLES, offsetBytes, drawCount, 0);
     }
@@ -47,6 +59,7 @@ public final class GLGraphicsPipeline implements GraphicsPipeline {
     public void drawIndirectCount(GpuBuffer indirectBuffer, long offsetBytes, GpuBuffer countBuffer,
                                   long countOffsetBytes, int maxDrawCount) {
         GL45.glUseProgram(programHandle);
+        GL45.glBindVertexArray(dummyVao);
         GL45.glBindBuffer(GL45.GL_DRAW_INDIRECT_BUFFER, ((GLBuffer) indirectBuffer).handle());
         GL45.glBindBuffer(ARBIndirectParameters.GL_PARAMETER_BUFFER_ARB, ((GLBuffer) countBuffer).handle());
         ARBIndirectParameters.glMultiDrawArraysIndirectCountARB(GL45.GL_TRIANGLES, offsetBytes, countOffsetBytes,
@@ -91,6 +104,7 @@ public final class GLGraphicsPipeline implements GraphicsPipeline {
             return;
         }
         GL45.glDeleteProgram(programHandle);
+        GL45.glDeleteVertexArrays(dummyVao);
         freed = true;
     }
 
