@@ -10,6 +10,7 @@ import dev.ev.neoforge.adapter.BlockPalette;
 import dev.ev.neoforge.config.EVConfig;
 import dev.ev.neoforge.config.EVConfigLoader;
 import dev.ev.neoforge.FarLodPassRenderer;
+import dev.ev.neoforge.metrics.DefaultMetricsRegistry;
 import dev.ev.render.culling.FrustumTester;
 import dev.ev.render.culling.SimpleTraversal;
 import dev.ev.render.dirty.DirtySectionTracker;
@@ -83,7 +84,7 @@ public final class EVInstance implements AutoCloseable {
     private EVInstance(RenderBackend backend, EVConfig config) {
         this.backend = Objects.requireNonNull(backend);
         this.config = Objects.requireNonNull(config);
-        this.metricsRegistry = new NoopMetricsRegistry();
+        this.metricsRegistry = new DefaultMetricsRegistry();
 
         // Storage subsystem
         this.sectionCache = new SectionCache(
@@ -394,24 +395,6 @@ public final class EVInstance implements AutoCloseable {
                 } catch (Exception ignored) {}
             }
             LOGGER.info("EVInstance closed");
-        }
-    }
-
-    // --- NoopMetricsRegistry inner class (unchanged from original) ---
-    private static class NoopMetricsRegistry implements MetricsRegistry {
-        @Override
-        public void recordQueueDepth(String queueName, int depth) {}
-        @Override
-        public void recordCacheAccess(String cacheName, boolean hit) {}
-        @Override
-        public void recordGpuPassDuration(String passName, long nanos) {}
-        @Override
-        public void recordCounter(String counterName, long delta) {}
-        @Override
-        public void recordImportStageStatus(dev.ev.api.metrics.ImportStageStatus status) {}
-        @Override
-        public dev.ev.api.metrics.MetricsSnapshot snapshot() {
-            return dev.ev.api.metrics.MetricsSnapshot.empty();
         }
     }
 }
