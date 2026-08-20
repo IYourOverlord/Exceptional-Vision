@@ -141,6 +141,17 @@ public final class EVInstance implements AutoCloseable {
         return dirtyTracker;
     }
 
+    /**
+     * Returns the SectionCache, used by the chunk-load listener in EV.java to acquire
+     * and populate level-0 section handles with real block data (see the "no full
+     * voxelization exists yet" gap documented on {@link InMemorySectionLoader}
+     * and {@link SectionGenerationPolicy}: this cache only ever
+     * creates empty handles on its own, something else has to fill them).
+     */
+    public SectionCache sectionCache() {
+        return sectionCache;
+    }
+
     /** Returns the BlockPalette for Minecraft adapters. */
     public BlockPalette blockPalette() {
         return blockPalette;
@@ -387,7 +398,7 @@ public final class EVInstance implements AutoCloseable {
     }
 
     // --- NoopMetricsRegistry inner class (unchanged from original) ---
-    private static class NoopMetricsRegistry implements dev.ev.api.metrics.MetricsRegistry {
+    private static class NoopMetricsRegistry implements MetricsRegistry {
         @Override
         public void recordQueueDepth(String queueName, int depth) {}
         @Override
