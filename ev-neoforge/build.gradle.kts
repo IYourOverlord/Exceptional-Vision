@@ -65,9 +65,23 @@ neoForge {
         }
     }
 
+    // ВАЖНО: ModDevGradle не выводит classpath рана автоматически из обычных Gradle
+    // project-зависимостей (implementation(project(":..."))) для multi-module setup — он
+    // собирает classpath рана только из sourceSet'ов, явно зарегистрированных здесь через
+    // sourceSet(...). Без явной регистрации sourceSet каждого подмодуля runClient видит
+    // только сам ev-neoforge и падает с NoClassDefFoundError на первом же классе из
+    // ev-api/ev-storage/ev-meshing/ev-gpu/ev-render при попытке зайти в мир (эмпирически
+    // подтверждено: сборка через `./gradlew build` компилирует все модули без ошибок, но
+    // debug-лог runClient показывает "Got mod coordinates" только для ev-neoforge/build/
+    // classes/java/main — ни один другой модуль в classpath рана не попадает).
     mods {
         create(property("mod_id") as String) {
             sourceSet(sourceSets.main.get())
+            sourceSet(project(":ev-api").extensions.getByType<SourceSetContainer>()["main"])
+            sourceSet(project(":ev-storage").extensions.getByType<SourceSetContainer>()["main"])
+            sourceSet(project(":ev-meshing").extensions.getByType<SourceSetContainer>()["main"])
+            sourceSet(project(":ev-gpu").extensions.getByType<SourceSetContainer>()["main"])
+            sourceSet(project(":ev-render").extensions.getByType<SourceSetContainer>()["main"])
         }
     }
 
