@@ -24,6 +24,18 @@ neoForge {
         create("client") {
             client()
             systemProperty("neoforge.enabledGameTestNamespaces", property("mod_id") as String)
+
+            // --- добавлено для P0-profiling-checkpoint ---
+            // JFR не требует -XX:+FlightRecorder начиная с JDK 9+, флаг больше не нужен.
+            // duration=120s покрывает и холодный старт (Сценарий A), и захват начала
+            // steady-state (Сценарий B) в одной записи; при необходимости раздели на два
+            // отдельных запуска с более коротким duration под каждый сценарий отдельно
+            // (см. jfr-profiling-runclient-snippet.md).
+            // settings=profile — встроенный профиль JFR с более детальными событиями
+            // (включая lock contention/method profiling), чем default; overhead всё ещё
+            // минимален (обычно <2%), но чуть выше чем settings=default — оправдано, так как
+            // тикет P0 явно просит cache/queue contention через JFR.
+            jvmArgument("-XX:StartFlightRecording=duration=120s,filename=ev-coldstart.jfr,settings=profile")
         }
 
         create("server") {
