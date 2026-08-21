@@ -1,0 +1,306 @@
+diff --git a/PROGRESS.md b/PROGRESS.md
+index 1babb41..162611f 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -2206,3 +2206,95 @@ session-level строка), "Модульная карта" (`ev-render` уже
+ существовал; `ev-neoforge` — дополнены записи `EV`/`EVInstance`/`DefaultMetricsRegistry`),
+ "Чего пока не существует" — сверен, отдельного пункта под эту находку не требуется, так как
+ теперь это не открытый пробел.
++
++## Сессия: camera-relative coordinate mismatch в far-LOD рендеринге (visible-sections: 0 на больших координатах)
++
++**Контекст**: пользователь сообщил о продолжении проблем с прорисовкой геометрии после
++предыдущего фикса `filterByDistance`/`onChunkUnload`. Анализ debug-снапшотов и лога показал два
++разных явления, требовавших разделения:
++
++1. `visible-sections: 375252` (третий снапшот, после `/kill`) — при перепроверке оказался
++   **не багом**, а известным, уже задокументированным в прошлой сессии артефактом накопительной
++   семантики `recordCounter`/`LongAdder` в `DefaultMetricsRegistry` (счётчик суммируется по
++   кадрам, а не отражает значение за один кадр). Реальное число видимых секций за кадр
++   (перепроверено отдельно) — порядка нескольких сотен, правдоподобно для near-camera геометрии.
++   Этот пункт не требовал нового фикса.
++2. `visible-sections: 0` в первых двух снапшотах, при этом `meshes-uploaded: 5528/5976`
++   (мешинг работает, геометрия реально намешана) — игрок был на координатах вида
++   `(2000, 74, 200000)`. Это оказалось новым, отдельным багом.
++
++**Причина (2)**: `EVInstance.renderFarLod` строил `mvp = proj * poseStack.pose()` и передавал
++эту матрицу и в `extractFrustumPlanes`, и в шейдер `far_lod_cube.vert`, но
++`sectionBoundingSphere(SectionPos)` и вершины куба в шейдере (`node.bounds.xyz`) работали в
++**абсолютных мировых координатах** (`pos.minBlockX()` и т.п.). `RenderLevelStageEvent#getPoseStack()`
++в NeoForge — camera-relative по контракту движка (подтверждено официальной рекомендацией
++NeoForge "Always account for camera position when rendering. Subtract camera position from world
++coordinates", а также документацией Iris по terrain-uniforms: сама позиция камеры уже вычтена
++до того, как PoseStack передаётся мод-коду — стандартная практика Minecraft с 1.14+ для защиты
++от float-precision проблем вдали от origin). Рассинхрон систем координат (world-absolute vs
++camera-relative) на малых координатах почти незаметен (обе системы почти совпадают у origin), но
++на `Z ~ 200000` расхождение — десятки тысяч блоков: все bounding sphere проваливали frustum-тест
++(`visible-sections: 0`), а те немногие, что всё же проходили бы, транслировались бы шейдером в
++координаты вне экрана/с грубыми артефактами.
++
++**Фикс** (`EVInstance.renderFarLod`, `ev-neoforge/.../EVInstance.java`):
++- `mvp` (`proj * poseStack.pose()`) остаётся построенным как раньше — подтверждено, что
++  `poseStack.pose()` уже rotation-only/camera-relative, так что этот `mvp` корректен для
++  трансформации именно **camera-relative** точек (мировая координата минус позиция камеры).
++- Новая локальная функция `cameraRelativeBounds` (`Function<SectionPos, float[]>`) — обёртка
++  вокруг существующего `sectionBoundingSphere`, вычитающая `cameraX/Y/Z` из центра сферы перед
++  возвратом. Поворот не применяется здесь намеренно — он уже заложен в `mvp` через
++  `poseStack.pose()`, так что остаётся только вычесть трансляцию.
++- `traversal.computeVisible(nearbySections, frustum, cameraRelativeBounds)` — раньше передавался
++  `this::sectionBoundingSphere` (абсолютные координаты), теперь `cameraRelativeBounds`.
++- `FarLodPassRenderer.record(commands, visibleSections, cameraRelativeBounds, viewProjColumnMajor)` —
++  аналогично, шейдер теперь получает координаты уже в той же системе, что и `uViewProj`.
++- `filterByDistance` (шаг 5, дистанционный cutoff) **не изменён** — он сравнивает абсолютные
++  `sectionBoundingSphere` против абсолютных `cameraX/Y/Z`, и эта разность инвариантна к общему
++  сдвигу системы координат, так что был и остаётся корректным независимо от абсолютной величины
++  координат.
++
++**Почему не тронут `filterByDistance`, но тронут только frustum/шейдер**: единственная операция,
++чувствительная к coordinate-space mismatch — это сравнение мировых координат с матрицей, которая
++имплицитно предполагает camera-relative вход (frustum planes из `mvp`, и `gl_Position = uViewProj
++* vec4(worldPos, 1.0)` в шейдере). Вычитание дистанции (`dx = bounds[0] - cameraX` и т.п.) не
++зависит от того, в какой системе координат находятся обе стороны вычитания, пока обе — в одной
++и той же (обе абсолютные) — поэтому этот код был и остаётся корректным без изменений.
++
++**Тесты** (`EVInstanceTest.java`): фикс дополнительно вынесен как отдельная чистая
++static-функция `EVInstance.toCameraRelative(float[] worldBounds, cameraX, cameraY, cameraZ)`
++(вычитает камеру из центра сферы, радиус не трогает) — тот же паттерн вынесения в
++package-private static ради юнит-тестируемости без GL/`Minecraft`, что уже применялся для
++`filterByDistance`/`calculateNearCutoffBlocks`. `renderFarLod`'s `cameraRelativeBounds` теперь
++просто вызывает `toCameraRelative(sectionBoundingSphere(pos), camX, camY, camZ)` вместо
++инлайновой лямбды. 3 новых сценария: базовое вычитание камеры (радиус не меняется), no-op на
++камере в origin (регрессионная защита — гарантирует точное совпадение с поведением до фикса
++вблизи (0,0,0)), и прямое воспроизведение чисел из репорта бага (`(2016,90,200016)` секция при
++камере на `(2000,74,200000)` → относительные координаты `(16,16,16)`, малые числа вместо
++абсолютных ~200000).
++
++
++**Не подтверждено реальным Gradle-билдом или запуском в игре в этой сессии** — песочница
++по-прежнему без сетевого доступа к репозиториям Minecraft/NeoForge и без установленного `javac`
++(`./gradlew` падает: `Could not find or load main class org.gradle.wrapper.GradleWrapperMain`,
++сам wrapper jar недоступен офлайн). Проверено вручную: баланс скобок обоих изменённых файлов,
++типовая совместимость сигнатур (`Function<SectionPos, float[]>` совпадает в
++`traversal.computeVisible` и `FarLodPassRenderer.record`), логическая согласованность систем
++координат по каждому шагу, а также сверены существующие тесты `EVInstanceTest` — они бьют
++только в `filterByDistance`/`calculateNearCutoffBlocks` (не тронуты этим фиксом), так что
++регрессий по уже существующим сценариям быть не должно.
++
++Требует от пользователя пересборки (`./gradlew :ev-neoforge:build`) и повторения того же
++сценария (телепорт на большие координаты вроде `(2000, 74, 200000)`, снятие `/ev debug` снапшота)
++для визуального подтверждения, что `visible-sections` перестал быть нулём и геометрия
++действительно рисуется на экране в правильном месте.
++
++**Отдельно, не в scope этого фикса**: сам факт, что `sectionBoundingSphere` продолжает
++возвращать абсолютные мировые координаты (используется также в `filterByDistance` и, вероятно,
++пригодится будущим тикетам вроде HiZ-occlusion/indirect multidraw из Волны 2) — оставлен как
++есть намеренно, чтобы не расширять эту сессию за пределы найденного бага; camera-relative
++конвертация сделана точечно только там, где она реально нужна (frustum test + GPU upload).
++Будущим тикетам, добавляющим новые точки использования `sectionBoundingSphere` для чего-либо,
++что взаимодействует с view/projection матрицами, стоит явно проверять, нужна ли им
++camera-relative версия — эта путаница абсолютных/относительных координат легко
++воспроизводится заново, если не держать её в уме как системное правило проекта.
+diff --git a/PROJECT_INDEX.md b/PROJECT_INDEX.md
+index b9e454e..a187836 100644
+--- a/PROJECT_INDEX.md
++++ b/PROJECT_INDEX.md
+@@ -65,6 +65,7 @@ VAO, создаётся один раз в конструкторе (`glCreateVe
+ | far-lod-pass draw (session, no ticket) | DONE | `far-lod-pass`'s `record()` (`EVInstance.renderFarLod`) больше не только пишет метрики — теперь реально рисует. Новый `dev.ev.neoforge.FarLodPassRenderer` (`ev-neoforge`): компилирует vertex+fragment GLSL пару (vertex pulling, без VAO/VBO — вершины куба генерируются процедурно в vertex shader из `gl_VertexID`/`gl_InstanceID`), заливает per-visible-section AABB (bounding sphere из `sectionBoundingSphere`) в Node storage-буфер (raскладка 1-в-1 с `node_buffer_aos.glsl`, 32 байта/нода) через `STAGING_UPLOAD`-буфер + `CommandList.uploadToBuffer`, собирает `DrawArraysIndirectCommand` (count=36, instanceCount=visibleSections.size()) и вызывает `CommandList.draw(...)` (единственный draw-путь по контракту `CommandList`/`GraphicsPipeline` — indirect-only, см. `GLCommandList.draw`). View-projection матрица передаётся как plain-uniform через новый MVP-only метод `GLGraphicsPipeline.useProgramAndSetViewProj(float[16])` (contract-обход: `GraphicsPipeline`/`PipelineLayout` не имеет понятия обычного uniform, только именованные буфер/текстур-биндинги — задокументировано в Javadoc метода как временный backend-specific escape hatch). Каждая видимая секция рисуется как цветной unit-куб, отмасштабированный/спозиционированный по своей bounding sphere — не настоящая meshlet-геометрия из конвейера мешинга (тот пока никуда на GPU не заливается), цель — только подтвердить, что draw call действительно работает и что-то попадает на экран; цвет по `gl_InstanceID % 8` — намеренная debug-визуализация, не материал, само по себе это не баг. Буферы (`nodeBuffer`, `stagingUpload`, `indirectBuffer`) и pipeline лениво создаются при первом кадре с видимыми секциями и переиспользуются между кадрами; `nodeBuffer`/`stagingUpload` пересоздаются (удваиваясь) только если требуемая ёмкость превышает текущую. **Компиляция подтверждена реальным запуском пользователем (2026-08-20, см. Багфикс 16 в `PROGRESS.md`)** — после фикса отсутствующего VAO в `GLGraphicsPipeline` (см. запись тикета 18 выше) draw call рисует цветные кубы-заглушки без GL-ошибок; `./gradlew build` отдельно не запускался в этой сессии, подтверждение — по факту работы в живой игре. Другие пассы/подсистемы не тронуты, профилирование не начиналось — оба вне рамок этой сессии. |
+ | production MetricsRegistry (session, no ticket) | DONE | Найдено при `P0-profiling-checkpoint`: `/ev debug` гарантированно печатал пустой снапшот, потому что `EVInstance` инстанцировал приватный inline `NoopMetricsRegistry` (все методы — пустые тела) как единственную production-реализацию `MetricsRegistry` — эта деталь никогда не была отражена в этом файле как известный пробел, хотя тикет 27 её фактически оставил (27 не специфицирует реализацию `MetricsRegistry`, только использование интерфейса). Добавлен `dev.ev.neoforge.metrics.DefaultMetricsRegistry` (`ev-neoforge`): `ConcurrentHashMap`-backed, lock-free hot path — `AtomicInteger` per queue name (gauge, overwrite semantics, соответствует `MeshTaskQueue`'s "текущая глубина", не аккумулятор), `LongAdder`-пара hits/total per cache name (выбран `LongAdder`, не `AtomicLong`, ради меньшей contention под конкурентной записью — `SectionCache.acquire` вызывается со всех worker-потоков на каждый lookup), volatile-backed last-write-wins `long` per GPU/CPU-pass name (`recordGpuPassDuration` — "текущая длительность", не сумма/среднее), `LongAdder` per counter name (`recordCounter`, аккумулирует delta). `recordImportStageStatus` — единственный `AtomicReference`, заменяется целиком (интерфейс уже документирует низкую частоту вызова). `snapshot()` — единственный аллоцирующий метод, копирует все карты в отсортированные неизменяемые `Map` (для детерминированного вывода `MetricsSnapshotFormatter`), намеренно не координируется глобально против конкурентных `recordXxx` (частичная рассинхронизация полей снапшота друг с другом на пограничный момент — приемлемая цена для diagnostic view, не для точного профилирования). `EVInstance` конструктор изменён с `new NoopMetricsRegistry()` на `new DefaultMetricsRegistry()`, приватный inner-класс `NoopMetricsRegistry` в `EVInstance.java` удалён целиком (был не документирован публично, использовался только там). Тесты: `DefaultMetricsRegistryTest` — 8 сценариев (gauge/accumulate/last-write-wins семантика по каждому из 5 методов интерфейса, null-контракт `recordImportStageStatus`, конкурентный сценарий — 8 потоков × 2000 операций на `recordCounter`/`recordCacheAccess`/`recordQueueDepth` одновременно, проверка отсутствия потерянных инкрементов через точное сравнение суммы). **Не подтверждено реальным Gradle-билдом в этой сессии** (см. "Компиляция и тесты" в `EV_SESSION_PROMPT.md` — песочница без доступа к Gradle/JDK) — требует `./gradlew :ev-neoforge:test` пользователем. Тестовые package-private `NoopMetricsRegistry` в `ev-storage`/`ev-meshing` (используются как фейки в их собственных тестах, см. записи тикета 08 выше и строку про `MeshTaskQueueTest`) не тронуты и не должны — это независимые классы в других модулях/пакетах, не тот же класс, что был в `EVInstance`. |
+ | stale far-LOD sections never evicted (session, no ticket) | DONE | Пользователь предоставил скриншоты (мерцающая стена наложенных текстур перед камерой, движущаяся вместе с ней, перекрывающая обзор) и логи/JFR из живого прогона: зашёл в существующий мир (только ванильная прорисовка видна изначально, `far-lod-pass: 0.00ms`, `visible-sections: 0`), затем `/kill` → респавн на точке возрождения → артефакты появились немедленно (`visible-sections: 162326` в следующем снапшоте `/ev debug`). JFR (`jdk.JavaErrorThrow`/`jdk.JavaExceptionThrow`, все 494 события проверены) не содержит ни одного исключения с фреймом `dev.ev` — не краш, архитектурная причина. Две независимые находки, действовавшие вместе: (1) `SectionGeometryMap.remove(SectionPos)` был реализован корректно с начала, но не имел ни одного вызывающего кода нигде в проекте — секции, намешенные с начала сессии, оставались резидентными навсегда, независимо от текущей позиции игрока (см. запись `SectionGeometryMap` в разделе `ev-render` выше); (2) `EVConfig.maxRenderDistanceBlocks` (дефолт 4096) читается конфиг-лоадером и печатается в `/ev reload-config`, но нигде не применяется как фактическое ограничение дальности far-LOD рендера — `FrustumTester`/`SimpleTraversal` делают только геометрический sphere-vs-6-planes тест без какой-либо проверки дистанции от игрока, `calculateNearCutoffBlocks()` в `EVInstance` тоже объявлен, но нигде не вызывается. Результат совпадения: после `/kill` старые, давно загруженные секции с прошлой позиции игрока (никогда не выгружавшиеся) геометрически пересекались с новым view frustum по направлению (без учёта реальной дистанции) и рисовались как огромные неуместные кубы — источник артефакта. **Фикс, две части:** (a) `EV.onChunkUnload(ChunkEvent.Unload)` — новый обработчик, вызывает `instance.geometryMap().remove(section)` для каждого level-0 Y-среза выгружаемой чанк-колонки (симметрично `onChunkLoad`/`voxelizeSection`); (b) `EVInstance.filterByDistance(...)` — новый package-private static метод, фильтрует `geometryMap.loadedSections()` по дистанции камера↔bounding-sphere (`maxDistanceBlocks + радиус секции`, переиспользует существующий `EVConfig.maxRenderDistanceBlocks()` как единственный источник правды по дальности, а не вводит второй параметр), вызывается в `renderFarLod` шагом 5, **перед** `SimpleTraversal.computeVisible` — так и `SimpleTraversal` избавлен от лишней работы над заведомо далёкими секциями, и сам traversal не нужно менять. Оба фикса нужны одновременно: (a) без (b) всё ещё оставляет секции резидентными до следующего unload соответствующего чанка (может не произойти сразу после телепорта, если чанк на старой позиции ещё физически загружен на сервере); (b) без (a) останавливает отрисовку, но `SectionGeometryMap` продолжает расти неограниченно (утечка памяти на длинных сессиях). Тесты: `SectionGeometryMapTest` (4 сценария, включая паттерн "все Y-срезы одной колонки", которым реально пользуется `onChunkUnload`), `EVInstanceTest` (4 новых сценария на `filterByDistance` — near/far cutoff, воспроизведение точного сценария бага "секция с прошлой удалённой позиции отбрасывается после `/kill`", учёт радиуса секции на границе cutoff, сохранение порядка и пустой список на входе). `filterByDistance` намеренно вынесен как чистая static-функция (без доступа к полям инстанса, только принимает `sectionBounds`-функцию параметром) специально ради юнит-тестируемости без GL-контекста/`Minecraft`-инстанса — тот же паттерн, что уже применялся для `calculateNearCutoffBlocks`. **Не подтверждено реальным Gradle-билдом или повторным запуском в игре в этой сессии** (песочница без доступа к Gradle/JDK — см. `EV_SESSION_PROMPT.md`) — требует `./gradlew :ev-neoforge:test :ev-render:test` и повторного `/kill`-сценария в живой игре от пользователя для подтверждения, что артефакт исчез. Отдельно замечено, но не входит в scope этого фикса: `recordCounter("visible-sections", ...)`/`recordCounter("loaded-sections", ...)` в `renderFarLod` семантически должны быть gauge, а не accumulate — см. примечание в записи `DefaultMetricsRegistry` выше. |
++| camera-relative coordinate mismatch в far-LOD (session, no ticket) | DONE | Продолжение отладки предыдущей строки: пользователь снова сообщил о проблемах с прорисовкой. Перепроверка снапшотов показала, что `visible-sections: 375252` после `/kill` — не новый баг, а тот же известный gauge/`LongAdder`-артефакт метрик (см. `DefaultMetricsRegistry` выше), реальное число видимых секций за кадр — сотни, правдоподобно. Но найден отдельный, настоящий баг: в первых снапшотах `visible-sections: 0` при `meshes-uploaded: 5528+` (мешинг работает) — игрок был на `(2000, 74, 200000)`. Причина: `renderFarLod` сравнивал/рисовал `sectionBoundingSphere` (абсолютные мировые координаты, `SectionPos.minBlockX/Y/Z`) через `mvp = proj * event.getPoseStack().last().pose()` — а `poseStack` в NeoForge camera-relative по контракту движка (позиция камеры не транслируется повторно; подтверждено официальной рекомендацией NeoForge и документацией Iris по terrain uniforms). На малых координатах несовпадение почти незаметно, на `Z~200000` — десятки тысяч блоков расхождения → все сферы проваливали frustum-тест. Фикс: новый package-private static метод `EVInstance.toCameraRelative(float[] worldBounds, cameraX, cameraY, cameraZ)` — вычитает камеру из центра сферы (радиус не трогает), тот же паттерн вынесения в чистую static-функцию, что и `filterByDistance`/`calculateNearCutoffBlocks`, ради юнит-тестируемости без GL/`Minecraft`. `renderFarLod`'s `cameraRelativeBounds = pos -> toCameraRelative(sectionBoundingSphere(pos), camX, camY, camZ)` передаётся в `traversal.computeVisible(...)` и `FarLodPassRenderer.record(...)` вместо старого `this::sectionBoundingSphere`. `filterByDistance` (дистанционный cutoff) не тронут — инвариантен к общему сдвигу координат. Тесты: 3 новых сценария в `EVInstanceTest` (базовое вычитание с сохранением радиуса, no-op-регрессия на камере в origin, прямое воспроизведение чисел из репорта бага — секция `(2016,90,200016)` при камере `(2000,74,200000)` даёт малые относительные координаты `(16,16,16)` вместо абсолютных ~200000). Подробности — `PROGRESS.md`. **Не подтверждено Gradle-билдом/игрой в этой сессии** — та же причина (нет `javac`/сети до NeoForge maven в песочнице); существующие тесты `EVInstanceTest` сверены и не задеты (бьют только в неизменённые `filterByDistance`/`calculateNearCutoffBlocks`). |
+ 
+ ## 🌊 Статус MVP/opt волн
+ 
+@@ -97,7 +98,7 @@ VAO, создаётся один раз в конструкторе (`glCreateVe
+ 
+ ### ev-neoforge — `dev.ev.neoforge`, `dev.ev.neoforge.config`, `dev.ev.neoforge.metrics` (тикеты 00, 27, 28)
+ - `EV` — entrypoint класс мода, аннотация `@Mod("ev")`, подписывается на `FMLClientSetupEvent`, `LevelEvent.Load`/`Unload`, `RenderLevelStageEvent`, `ChunkEvent.Load`/`Unload`. Регистрирует `EVConfigLoader` в NeoForge `ModContainer`. **Багфикс (session, no ticket, 2026-08-21):** новый `onChunkUnload(ChunkEvent.Unload)` — вызывает `instance.geometryMap().remove(section)` для каждого level-0 Y-среза выгружаемой чанк-колонки (тот же loop-паттерн по Y, что и в `onChunkLoad`/`voxelizeSection`, только зеркально на unload). Часть фикса "мерцающей стены текстур" после `/kill`/долгого телепорта — см. запись `SectionGeometryMap` в разделе `ev-render` выше и `filterByDistance` в `EVInstance` ниже.
+-- `EVInstance` — жизненный цикл одного мира/рендер-контекста. `bootstrap()` создает `GLRenderBackend` при наличии GL-контекста. Метод `renderFarLod` очищает GL state и рассчитывает nearCutoffBlocks с умножением на `Math.sqrt(2.0)`. Конструктор инстанцирует `DefaultMetricsRegistry` (`dev.ev.neoforge.metrics`, session-level фикс — см. запись "production MetricsRegistry" в таблице статуса выше); до этой правки использовался приватный inline `NoopMetricsRegistry`, из-за чего `/ev debug` всегда возвращал пустой снапшот. Новый геттер `geometryMap()` — используется `EV.onChunkUnload`. **Багфикс (session, no ticket, 2026-08-21):** новый статический метод `filterByDistance(...)` — фильтрует `geometryMap.loadedSections()` по дистанции камера↔bounding-sphere секции (`maxDistanceBlocks` из `EVConfig.maxRenderDistanceBlocks()`, ранее нигде не применявшегося как реальное ограничение) **перед** `SimpleTraversal.computeVisible`, вызывается в `renderFarLod` как шаг 5. `FrustumTester` сам по себе не проверяет дистанцию от игрока — только геометрическое пересечение с 6 плоскостями текущего frustum, поэтому без этого фильтра давно загруженные, но никогда не выгружавшиеся секции с прошлой позиции игрока (см. `SectionGeometryMap` выше) оставались валидными кандидатами на отрисовку бесконечно и после дальнего телепорта могли случайно пересечься с новым frustum по направлению — источник артефакта "мерцающая стена наложенных текстур" после `/kill`. Метод package-private static (не зависит от полей инстанса, только от переданной `sectionBounds`-функции) намеренно — для юнит-тестируемости без GL/`Minecraft`-контекста.
++- `EVInstance` — жизненный цикл одного мира/рендер-контекста. `bootstrap()` создает `GLRenderBackend` при наличии GL-контекста. Метод `renderFarLod` очищает GL state и рассчитывает nearCutoffBlocks с умножением на `Math.sqrt(2.0)`. Конструктор инстанцирует `DefaultMetricsRegistry` (`dev.ev.neoforge.metrics`, session-level фикс — см. запись "production MetricsRegistry" в таблице статуса выше); до этой правки использовался приватный inline `NoopMetricsRegistry`, из-за чего `/ev debug` всегда возвращал пустой снапшот. Новый геттер `geometryMap()` — используется `EV.onChunkUnload`. **Багфикс (session, no ticket, 2026-08-21):** новый статический метод `filterByDistance(...)` — фильтрует `geometryMap.loadedSections()` по дистанции камера↔bounding-sphere секции (`maxDistanceBlocks` из `EVConfig.maxRenderDistanceBlocks()`, ранее нигде не применявшегося как реальное ограничение) **перед** `SimpleTraversal.computeVisible`, вызывается в `renderFarLod` как шаг 5. `FrustumTester` сам по себе не проверяет дистанцию от игрока — только геометрическое пересечение с 6 плоскостями текущего frustum, поэтому без этого фильтра давно загруженные, но никогда не выгружавшиеся секции с прошлой позиции игрока (см. `SectionGeometryMap` выше) оставались валидными кандидатами на отрисовку бесконечно и после дальнего телепорта могли случайно пересечься с новым frustum по направлению — источник артефакта "мерцающая стена наложенных текстур" после `/kill`. Метод package-private static (не зависит от полей инстанса, только от переданной `sectionBounds`-функции) намеренно — для юнит-тестируемости без GL/`Minecraft`-контекста. **Багфикс (session, no ticket, 2026-08-21, вторая находка той же сессии):** `renderFarLod` сравнивал абсолютные мировые bounding-sphere координаты (`sectionBoundingSphere`, из `SectionPos.minBlockX/Y/Z`) против `mvp`, построенной из `event.getPoseStack().last().pose()` — camera-relative по контракту NeoForge (позиция камеры уже вычтена движком, не транслируется заново). На малых координатах рассинхрон не проявлялся; на больших (`Z ~ 200000` после дальнего `/tp`) все секции проваливали frustum-тест — `visible-sections: 0` при исправно работающем мешинге (`meshes-uploaded` > 0). Фикс: новый package-private static метод `toCameraRelative(float[] worldBounds, cameraX, cameraY, cameraZ)` — вычитает камеру из центра сферы (радиус не трогает), тот же паттерн юнит-тестируемой static-функции, что и `filterByDistance`. `renderFarLod` строит `cameraRelativeBounds = pos -> toCameraRelative(sectionBoundingSphere(pos), camX, camY, camZ)` и передаёт её в `traversal.computeVisible(...)` и `FarLodPassRenderer.record(...)` вместо `this::sectionBoundingSphere`; `mvp`/`extractFrustumPlanes` не изменились по конструкции (по-прежнему `proj * poseStack.pose()`), но теперь корректно тестируются/рисуются camera-relative координаты, а не абсолютные. `filterByDistance` (дистанционный cutoff, шаг 5) не тронут — сравнение расстояний инвариантно к общему сдвигу системы координат, поэтому оставался корректным независимо от этого бага. Подробности и обоснование — `PROGRESS.md`, запись "camera-relative coordinate mismatch в far-LOD рендеринге". **Не подтверждено реальным Gradle-билдом/игрой в этой сессии** — песочница по-прежнему без `javac`/сетевого доступа к NeoForge maven.
+ - `DefaultMetricsRegistry` (`dev.ev.neoforge.metrics`) — production-реализация `MetricsRegistry`. Lock-free hot path: `ConcurrentHashMap` + `AtomicInteger` (queue depths, gauge-семантика), `LongAdder`-пара hits/total на cache name (hit rate), volatile-backed last-write-wins `long` на pass name (GPU/CPU pass durations), `LongAdder` на counter name (аккумулирует delta). `recordImportStageStatus` — единственный `AtomicReference`, заменяется целиком. `snapshot()` — единственный аллоцирующий метод, копирует карты в отсортированные неизменяемые `Map`, не координируется глобально против конкурентных записей (приемлемо для diagnostic view). **Известный отдельный пробел, не тронут в этой сессии:** `EVInstance.renderFarLod` вызывает `metricsRegistry.recordCounter("visible-sections", ...)`/`recordCounter("loaded-sections", ...)` каждый кадр — оба семантически являются gauge-значениями ("сколько сейчас"), а `recordCounter` аккумулирует через `LongAdder`, поэтому оба показателя в `/ev debug` растут неограниченно и не отражают реальное текущее количество; обнаружено при разборе логов `visible-sections: 162326` после `/kill` в текущей сессии, но не входит в scope этого фикса (сам по себе не является причиной визуальных артефактов — влияет только на достоверность вывода `/ev debug`, не на рендеринг).
+ - `EVConfig` (`dev.ev.neoforge.config`) — immutable record конфигурации мода с методом `validated()`, производящим безопасный clamping параметров при выходе за пределы допусков.
+ - `EVConfigLoader` (`dev.ev.neoforge.config`) — мост конфигурации с NeoForge `ModConfigSpec`. Клиентский файл конфигурации регистрируется через `container.registerConfig(ModConfig.Type.CLIENT, SPEC)`.
+diff --git a/ev-neoforge/src/main/java/dev/ev/neoforge/EVInstance.java b/ev-neoforge/src/main/java/dev/ev/neoforge/EVInstance.java
+index d9d98cc..16f53c6 100644
+--- a/ev-neoforge/src/main/java/dev/ev/neoforge/EVInstance.java
++++ b/ev-neoforge/src/main/java/dev/ev/neoforge/EVInstance.java
+@@ -268,7 +268,34 @@ public final class EVInstance implements AutoCloseable {
+                     cameraX, cameraY, cameraZ, viewDirX, viewDirY, viewDirZ
+             );
+ 
+-            // 4. Build frustum from view-projection matrix
++            // 4. Build frustum from view-projection matrix.
++            //
++            // IMPORTANT — camera-relative coordinate space:
++            // Vanilla/NeoForge's RenderLevelStageEvent#getPoseStack() is the terrain
++            // render matrix, which per NeoForge's own rendering guidance ("Always
++            // account for camera position when rendering. Subtract camera position
++            // from world coordinates") does NOT include a translation by the camera's
++            // absolute world position — the engine already renders everything
++            // camera-relative to avoid float-precision blowups far from the origin.
++            // sectionBoundingSphere() and the far-LOD cube shader, however, work in
++            // absolute world-space blocks (SectionPos.minBlockX()/Y()/Z()). Comparing
++            // absolute-world bounding spheres against a camera-relative frustum (or
++            // feeding absolute-world positions into the camera-relative MVP in the
++            // shader) is a coordinate-space mismatch: harmless near the origin (the
++            // two spaces nearly coincide there) but catastrophic far away — at
++            // world Z ~200000 the mismatch is tens of thousands of blocks, so every
++            // section fails the frustum test (visible-sections: 0) or, when it does
++            // pass, gets transformed to garbage screen positions.
++            //
++            // Fix: poseStack's pose() is rotation-only / camera-relative (no
++            // translation by the camera's absolute world position — see note above),
++            // so mvp = proj * poseStack.pose() is exactly the matrix that maps
++            // *camera-relative* points (world position minus camera position) to clip
++            // space. We build that same mvp here for frustum-plane extraction, and
++            // everywhere we previously fed it an absolute-world position (bounding
++            // spheres, shader vertices) we now explicitly subtract cameraPos first
++            // (see cameraRelativeBounds below), so both sides of every comparison are
++            // in the same camera-relative, camera-rotated space.
+             Matrix4f projMatrix = event.getProjectionMatrix();
+             Matrix4f modelViewMatrix = event.getPoseStack() != null
+                     ? event.getPoseStack().last().pose()
+@@ -297,11 +324,28 @@ public final class EVInstance implements AutoCloseable {
+             List<SectionPos> nearbySections = filterByDistance(
+                     loadedSections, cameraX, cameraY, cameraZ, maxDistanceBlocks, this::sectionBoundingSphere
+             );
++            // Camera-relative bounding spheres for both the frustum test and the GPU
++            // upload below — see the coordinate-space note above. mvp already expects
++            // camera-relative (rotation-applied) input, so subtracting cameraPos here
++            // (world axes, no rotation needed — mvp's view half supplies the rotation)
++            // makes every downstream comparison and shader transform consistent,
++            // matching the old absolute-world behavior near the origin exactly and
++            // fixing it everywhere else.
++            final float camX = cameraX, camY = cameraY, camZ = cameraZ;
++            java.util.function.Function<SectionPos, float[]> cameraRelativeBounds =
++                    pos -> toCameraRelative(sectionBoundingSphere(pos), camX, camY, camZ);
+             List<SectionPos> visibleSections = traversal.computeVisible(
+-                    nearbySections, frustum, this::sectionBoundingSphere
++                    nearbySections, frustum, cameraRelativeBounds
+             );
+ 
+-            // 6. Execute frame graph with visible sections
++            // 6. Execute frame graph with visible sections.
++            // Reuse the same mvp (= proj * camera-relative rotation-only view) built
++            // above for frustum-plane extraction. Since every node's bounds are now
++            // camera-relative too (cameraRelativeBounds), mvp * vec4(cameraRelativeBounds, 1)
++            // in the shader is equivalent to the original proj * view * worldPos —
++            // just computed with small, camera-local numbers instead of huge
++            // absolute-world ones, which is what actually fixes both the culling and
++            // the on-screen positions far from the origin.
+             float[] viewProjColumnMajor = new float[16];
+             mvp.get(viewProjColumnMajor);
+ 
+@@ -313,8 +357,11 @@ public final class EVInstance implements AutoCloseable {
+                     // (vertex-pulling from a Node storage buffer, no real meshlet
+                     // geometry yet — see FarLodPassRenderer's Javadoc) to prove the
+                     // draw path actually produces visible geometry on screen.
++                    // cameraRelativeBounds (not sectionBoundingSphere) so the vertex
++                    // shader's worldPos ends up in the same camera-relative space as
++                    // uViewProj — see the coordinate-space note above.
+                     FarLodPassRenderer.record(
+-                            commands, visibleSections, EVInstance.this::sectionBoundingSphere,
++                            commands, visibleSections, cameraRelativeBounds,
+                             viewProjColumnMajor);
+ 
+                     metricsRegistry.recordCounter("visible-sections", visibleSections.size());
+@@ -379,6 +426,41 @@ public final class EVInstance implements AutoCloseable {
+         return new float[]{centerX, centerY, centerZ, radius};
+     }
+ 
++    /**
++     * Translates an absolute-world bounding sphere [centerX, centerY, centerZ, radius]
++     * into camera-relative space (subtracts the camera's world position from the
++     * center; radius is unaffected by a pure translation).
++     * <p>
++     * Exists as a standalone static/pure function — same rationale as
++     * {@link #filterByDistance}: unit-testable without a GL context or a live
++     * {@link Minecraft} instance.
++     * <p>
++     * Callers must pair this with an MVP matrix built from a camera-relative
++     * (rotation-only, no camera-position translation) view matrix — e.g. vanilla/
++     * NeoForge's {@code RenderLevelStageEvent#getPoseStack()} — so that both the
++     * frustum-plane test and the GPU vertex transform operate in the same coordinate
++     * space. See {@link #renderFarLod}'s "Build frustum from view-projection matrix"
++     * step for the full explanation of why this conversion is necessary: comparing
++     * absolute-world bounds against a camera-relative MVP works fine near the world
++     * origin (where the two spaces nearly coincide) but silently fails far away, where
++     * the mismatch can be tens of thousands of blocks.
++     *
++     * @param worldBounds absolute-world [centerX, centerY, centerZ, radius], as
++     *                    returned by {@link #sectionBoundingSphere}
++     * @param cameraX     camera world X
++     * @param cameraY     camera world Y
++     * @param cameraZ     camera world Z
++     * @return camera-relative [centerX, centerY, centerZ, radius]
++     */
++    static float[] toCameraRelative(float[] worldBounds, float cameraX, float cameraY, float cameraZ) {
++        return new float[]{
++                worldBounds[0] - cameraX,
++                worldBounds[1] - cameraY,
++                worldBounds[2] - cameraZ,
++                worldBounds[3]
++        };
++    }
++
+     /**
+      * Extracts 6 frustum planes from a combined view-projection matrix.
+      * Each plane: [nx, ny, nz, d]. Total array length = 24.
+diff --git a/ev-neoforge/src/test/java/dev/ev/neoforge/EVInstanceTest.java b/ev-neoforge/src/test/java/dev/ev/neoforge/EVInstanceTest.java
+index eb432ad..10cc063 100644
+--- a/ev-neoforge/src/test/java/dev/ev/neoforge/EVInstanceTest.java
++++ b/ev-neoforge/src/test/java/dev/ev/neoforge/EVInstanceTest.java
+@@ -119,4 +119,54 @@ class EVInstanceTest {
+ 
+         assertEquals(List.of(a, b), result);
+     }
++
++    @Test
++    @DisplayName("toCameraRelative subtracts camera position from center, leaves radius untouched")
++    void testToCameraRelativeSubtractsCameraPosition() {
++        float[] worldBounds = new float[]{2016f, 82f, 200016f, 27.7f};
++
++        float[] relative = EVInstance.toCameraRelative(worldBounds, 2000f, 74f, 200000f);
++
++        assertEquals(16f, relative[0], 0.001f);
++        assertEquals(8f, relative[1], 0.001f);
++        assertEquals(16f, relative[2], 0.001f);
++        assertEquals(27.7f, relative[3], 0.001f,
++                "radius must be unaffected by a pure translation");
++    }
++
++    @Test
++    @DisplayName("toCameraRelative is a no-op when the camera sits at the world origin "
++            + "(regression guard: must exactly match pre-fix absolute-world behavior near origin)")
++    void testToCameraRelativeNoOpAtOrigin() {
++        float[] worldBounds = new float[]{123.5f, 64f, -45f, 27.7f};
++
++        float[] relative = EVInstance.toCameraRelative(worldBounds, 0f, 0f, 0f);
++
++        assertArrayEquals(worldBounds, relative, 0.0001f);
++    }
++
++    @Test
++    @DisplayName("toCameraRelative brings a far-away section (world Z ~ 200000, matching the "
++            + "reported bug's coordinates) down to small, camera-local numbers")
++    void testToCameraRelativeFixesLargeWorldCoordinateMismatch() {
++        // Matches the reported scenario: player teleported to (2000, 74, 200000), a
++        // section meshed right next to the camera at world (2016, 90, 200016).
++        float[] worldBounds = new float[]{2016f, 90f, 200016f, 16f};
++
++        float[] relative = EVInstance.toCameraRelative(worldBounds, 2000f, 74f, 200000f);
++
++        // Before the fix, this section's absolute-world center (2016, 90, 200016) was
++        // compared directly against a camera-relative frustum built around (0,0,0) —
++        // a mismatch of ~200000 units, guaranteeing frustum-test failure regardless of
++        // how close the section actually was to the camera. After the fix, the
++        // camera-relative center must be small (on the order of the section's own
++        // size), not on the order of the absolute world coordinate.
++        assertEquals(16f, relative[0], 0.001f);
++        assertEquals(16f, relative[1], 0.001f);
++        assertEquals(16f, relative[2], 0.001f);
++        assertTrue(Math.abs(relative[0]) < 1000f && Math.abs(relative[1]) < 1000f
++                        && Math.abs(relative[2]) < 1000f,
++                "camera-relative coordinates for a nearby section must be small, not on "
++                        + "the order of the absolute world position");
++    }
+ }

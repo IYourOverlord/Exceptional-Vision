@@ -268,11 +268,43 @@ public final class EVInstance implements AutoCloseable {
                     cameraX, cameraY, cameraZ, viewDirX, viewDirY, viewDirZ
             );
 
-            // 4. Build frustum from view-projection matrix
+            // 4. Build frustum from view-projection matrix.
+            //
+            // IMPORTANT — camera-relative coordinate space:
+            // Vanilla/NeoForge's terrain render matrix ("modelView") is camera-relative:
+            // it does NOT include a translation by the camera's absolute world position
+            // — the engine already renders everything relative to the camera to avoid
+            // float-precision blowups far from the origin. sectionBoundingSphere() and
+            // the far-LOD cube shader, however, work in absolute world-space blocks
+            // (SectionPos.minBlockX()/Y()/Z()). Comparing absolute-world bounding
+            // spheres against a camera-relative frustum (or feeding absolute-world
+            // positions into the camera-relative MVP in the shader) is a
+            // coordinate-space mismatch: harmless near the origin (the two spaces
+            // nearly coincide there) but catastrophic far away — at world Z ~200000
+            // the mismatch is tens of thousands of blocks, so every section fails the
+            // frustum test (visible-sections: 0) or, when it does pass, gets
+            // transformed to garbage screen positions.
+            //
+            // getModelViewMatrix() vs getPoseStack() — this bit otherwise reintroduces
+            // the same class of bug in a different guise: RenderLevelStageEvent exposes
+            // BOTH event.getPoseStack() AND event.getModelViewMatrix() as separate,
+            // independently-constructed values (see the event's constructor). An
+            // earlier version of this fix used event.getPoseStack().last().pose(),
+            // which compiles fine and is non-null on AFTER_SOLID_BLOCKS, but is NOT
+            // guaranteed to be the actual camera-rotation matrix the vanilla terrain
+            // pass renders with on every NeoForge version/stage — poseStack here can be
+            // an incidental, possibly-identity stack rather than the real view
+            // transform. The visible symptom of using the wrong one was exactly what
+            // was reported: geometry appearing to be "glued" to the screen and sliding
+            // in lock-step with camera pitch/yaw — i.e. an MVP with no real camera
+            // rotation applied, so only the projection matrix (a fixed, camera-facing
+            // transform) was moving the geometry on screen as the view direction
+            // changed. event.getModelViewMatrix() is the value NeoForge's own
+            // LevelRenderer patch constructs and passes into this exact event
+            // specifically to represent "the model-view matrix used for rendering" —
+            // that is the authoritative one to multiply against the projection matrix.
             Matrix4f projMatrix = event.getProjectionMatrix();
-            Matrix4f modelViewMatrix = event.getPoseStack() != null
-                    ? event.getPoseStack().last().pose()
-                    : new Matrix4f();
+            Matrix4f modelViewMatrix = event.getModelViewMatrix();
             Matrix4f mvp = new Matrix4f(projMatrix).mul(modelViewMatrix);
             float[] planes = extractFrustumPlanes(mvp);
             FrustumTester frustum = new FrustumTester(planes);
@@ -297,11 +329,28 @@ public final class EVInstance implements AutoCloseable {
             List<SectionPos> nearbySections = filterByDistance(
                     loadedSections, cameraX, cameraY, cameraZ, maxDistanceBlocks, this::sectionBoundingSphere
             );
+            // Camera-relative bounding spheres for both the frustum test and the GPU
+            // upload below — see the coordinate-space note above. mvp already expects
+            // camera-relative (rotation-applied) input, so subtracting cameraPos here
+            // (world axes, no rotation needed — mvp's view half supplies the rotation)
+            // makes every downstream comparison and shader transform consistent,
+            // matching the old absolute-world behavior near the origin exactly and
+            // fixing it everywhere else.
+            final float camX = cameraX, camY = cameraY, camZ = cameraZ;
+            java.util.function.Function<SectionPos, float[]> cameraRelativeBounds =
+                    pos -> toCameraRelative(sectionBoundingSphere(pos), camX, camY, camZ);
             List<SectionPos> visibleSections = traversal.computeVisible(
-                    nearbySections, frustum, this::sectionBoundingSphere
+                    nearbySections, frustum, cameraRelativeBounds
             );
 
-            // 6. Execute frame graph with visible sections
+            // 6. Execute frame graph with visible sections.
+            // Reuse the same mvp (= proj * camera-relative rotation-only view) built
+            // above for frustum-plane extraction. Since every node's bounds are now
+            // camera-relative too (cameraRelativeBounds), mvp * vec4(cameraRelativeBounds, 1)
+            // in the shader is equivalent to the original proj * view * worldPos —
+            // just computed with small, camera-local numbers instead of huge
+            // absolute-world ones, which is what actually fixes both the culling and
+            // the on-screen positions far from the origin.
             float[] viewProjColumnMajor = new float[16];
             mvp.get(viewProjColumnMajor);
 
@@ -313,8 +362,11 @@ public final class EVInstance implements AutoCloseable {
                     // (vertex-pulling from a Node storage buffer, no real meshlet
                     // geometry yet — see FarLodPassRenderer's Javadoc) to prove the
                     // draw path actually produces visible geometry on screen.
+                    // cameraRelativeBounds (not sectionBoundingSphere) so the vertex
+                    // shader's worldPos ends up in the same camera-relative space as
+                    // uViewProj — see the coordinate-space note above.
                     FarLodPassRenderer.record(
-                            commands, visibleSections, EVInstance.this::sectionBoundingSphere,
+                            commands, visibleSections, cameraRelativeBounds,
                             viewProjColumnMajor);
 
                     metricsRegistry.recordCounter("visible-sections", visibleSections.size());
@@ -377,6 +429,41 @@ public final class EVInstance implements AutoCloseable {
         // Radius = half-diagonal of the cube = halfSize * sqrt(3)
         float radius = halfSize * 1.7320508f;
         return new float[]{centerX, centerY, centerZ, radius};
+    }
+
+    /**
+     * Translates an absolute-world bounding sphere [centerX, centerY, centerZ, radius]
+     * into camera-relative space (subtracts the camera's world position from the
+     * center; radius is unaffected by a pure translation).
+     * <p>
+     * Exists as a standalone static/pure function — same rationale as
+     * {@link #filterByDistance}: unit-testable without a GL context or a live
+     * {@link Minecraft} instance.
+     * <p>
+     * Callers must pair this with an MVP matrix built from a camera-relative
+     * (rotation-only, no camera-position translation) view matrix — e.g. vanilla/
+     * NeoForge's {@code RenderLevelStageEvent#getModelViewMatrix()} — so that both the
+     * frustum-plane test and the GPU vertex transform operate in the same coordinate
+     * space. See {@link #renderFarLod}'s "Build frustum from view-projection matrix"
+     * step for the full explanation of why this conversion is necessary: comparing
+     * absolute-world bounds against a camera-relative MVP works fine near the world
+     * origin (where the two spaces nearly coincide) but silently fails far away, where
+     * the mismatch can be tens of thousands of blocks.
+     *
+     * @param worldBounds absolute-world [centerX, centerY, centerZ, radius], as
+     *                    returned by {@link #sectionBoundingSphere}
+     * @param cameraX     camera world X
+     * @param cameraY     camera world Y
+     * @param cameraZ     camera world Z
+     * @return camera-relative [centerX, centerY, centerZ, radius]
+     */
+    static float[] toCameraRelative(float[] worldBounds, float cameraX, float cameraY, float cameraZ) {
+        return new float[]{
+                worldBounds[0] - cameraX,
+                worldBounds[1] - cameraY,
+                worldBounds[2] - cameraZ,
+                worldBounds[3]
+        };
     }
 
     /**

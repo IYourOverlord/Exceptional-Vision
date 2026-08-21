@@ -119,4 +119,54 @@ class EVInstanceTest {
 
         assertEquals(List.of(a, b), result);
     }
+
+    @Test
+    @DisplayName("toCameraRelative subtracts camera position from center, leaves radius untouched")
+    void testToCameraRelativeSubtractsCameraPosition() {
+        float[] worldBounds = new float[]{2016f, 82f, 200016f, 27.7f};
+
+        float[] relative = EVInstance.toCameraRelative(worldBounds, 2000f, 74f, 200000f);
+
+        assertEquals(16f, relative[0], 0.001f);
+        assertEquals(8f, relative[1], 0.001f);
+        assertEquals(16f, relative[2], 0.001f);
+        assertEquals(27.7f, relative[3], 0.001f,
+                "radius must be unaffected by a pure translation");
+    }
+
+    @Test
+    @DisplayName("toCameraRelative is a no-op when the camera sits at the world origin "
+            + "(regression guard: must exactly match pre-fix absolute-world behavior near origin)")
+    void testToCameraRelativeNoOpAtOrigin() {
+        float[] worldBounds = new float[]{123.5f, 64f, -45f, 27.7f};
+
+        float[] relative = EVInstance.toCameraRelative(worldBounds, 0f, 0f, 0f);
+
+        assertArrayEquals(worldBounds, relative, 0.0001f);
+    }
+
+    @Test
+    @DisplayName("toCameraRelative brings a far-away section (world Z ~ 200000, matching the "
+            + "reported bug's coordinates) down to small, camera-local numbers")
+    void testToCameraRelativeFixesLargeWorldCoordinateMismatch() {
+        // Matches the reported scenario: player teleported to (2000, 74, 200000), a
+        // section meshed right next to the camera at world (2016, 90, 200016).
+        float[] worldBounds = new float[]{2016f, 90f, 200016f, 16f};
+
+        float[] relative = EVInstance.toCameraRelative(worldBounds, 2000f, 74f, 200000f);
+
+        // Before the fix, this section's absolute-world center (2016, 90, 200016) was
+        // compared directly against a camera-relative frustum built around (0,0,0) —
+        // a mismatch of ~200000 units, guaranteeing frustum-test failure regardless of
+        // how close the section actually was to the camera. After the fix, the
+        // camera-relative center must be small (on the order of the section's own
+        // size), not on the order of the absolute world coordinate.
+        assertEquals(16f, relative[0], 0.001f);
+        assertEquals(16f, relative[1], 0.001f);
+        assertEquals(16f, relative[2], 0.001f);
+        assertTrue(Math.abs(relative[0]) < 1000f && Math.abs(relative[1]) < 1000f
+                        && Math.abs(relative[2]) < 1000f,
+                "camera-relative coordinates for a nearby section must be small, not on "
+                        + "the order of the absolute world position");
+    }
 }
