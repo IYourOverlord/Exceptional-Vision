@@ -153,6 +153,16 @@ public final class EVInstance implements AutoCloseable {
         return sectionCache;
     }
 
+    /** Returns the SectionGeometryMap, used by the chunk-unload listener in EV.java
+     * to evict geometry for sections whose backing chunk data left the client's
+     * loaded radius (see {@code EV.onChunkUnload}) — without this, geometry for
+     * sections outside the current render distance would remain resident forever
+     * and keep being tested for visibility every frame regardless of distance to
+     * the player. */
+    public SectionGeometryMap geometryMap() {
+        return geometryMap;
+    }
+
     /** Returns the BlockPalette for Minecraft adapters. */
     public BlockPalette blockPalette() {
         return blockPalette;
@@ -174,6 +184,50 @@ public final class EVInstance implements AutoCloseable {
      */
     public static float calculateNearCutoffBlocks(int renderDistanceChunks, float marginChunks) {
         return renderDistanceChunks * 16.0f * (float) Math.sqrt(2.0) + marginChunks * 16.0f;
+    }
+
+    /**
+     * Filters a list of loaded sections down to only those within
+     * {@code maxDistanceBlocks} of the camera, measured center-to-camera against each
+     * section's own bounding sphere (so a large/high-LOD section isn't dropped just
+     * because its center sits slightly past the cutoff while part of its volume is
+     * still within budget — the comparison uses {@code maxDistanceBlocks + radius}).
+     * <p>
+     * Exists as a standalone static/pure function (no field access, only the passed-in
+     * {@code sectionBounds} function) specifically so this filtering logic — the fix for
+     * stale, far-away sections geometrically intersecting the current view frustum by
+     * direction alone after a long-distance teleport (see {@link #renderFarLod}'s
+     * "Distance-based cutoff" step) — is unit-testable without a GL context or a live
+     * {@link Minecraft} instance.
+     *
+     * @param loadedSections   every section currently resident, non-null
+     * @param cameraX          camera world X
+     * @param cameraY          camera world Y
+     * @param cameraZ          camera world Z
+     * @param maxDistanceBlocks non-negative distance budget in blocks (see {@code
+     *                          EVConfig.maxRenderDistanceBlocks()})
+     * @param sectionBounds    world-space bounding sphere [x, y, z, radius] for a SectionPos
+     * @return sections within budget, in the same relative order as {@code loadedSections}
+     */
+    static List<SectionPos> filterByDistance(
+            List<SectionPos> loadedSections,
+            float cameraX, float cameraY, float cameraZ,
+            float maxDistanceBlocks,
+            java.util.function.Function<SectionPos, float[]> sectionBounds
+    ) {
+        List<SectionPos> nearbySections = new java.util.ArrayList<>(loadedSections.size());
+        for (SectionPos pos : loadedSections) {
+            float[] bounds = sectionBounds.apply(pos);
+            float dx = bounds[0] - cameraX;
+            float dy = bounds[1] - cameraY;
+            float dz = bounds[2] - cameraZ;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            float cutoff = maxDistanceBlocks + bounds[3];
+            if (distSq <= cutoff * cutoff) {
+                nearbySections.add(pos);
+            }
+        }
+        return nearbySections;
     }
 
     /**
@@ -224,9 +278,27 @@ public final class EVInstance implements AutoCloseable {
             FrustumTester frustum = new FrustumTester(planes);
 
             // 5. Traverse visible sections
+            // Distance-based cutoff FIRST, before the frustum test: FrustumTester only
+            // checks whether a section's bounding sphere intersects the current view
+            // frustum's 6 planes (derived from the vanilla projection matrix) — it does
+            // NOT check distance from the player on its own. Without this filter, any
+            // section ever loaded into geometryMap this session (which is never evicted
+            // except on world unload — see EV.onChunkUnload for the eviction-on-unload
+            // half of this fix) stays a traversal/render candidate forever: after a
+            // teleport far away (e.g. /kill respawn), old far-away sections can still
+            // geometrically intersect the new frustum by direction alone and get drawn
+            // as huge, wrongly-placed unit cubes — the "flickering wall of textures"
+            // artifact. maxRenderDistanceBlocks is the config's own stated far-LOD
+            // distance budget, so reusing it here (rather than inventing a second
+            // distance knob) keeps a single source of truth for how far EV is supposed
+            // to draw.
+            float maxDistanceBlocks = config.maxRenderDistanceBlocks();
             List<SectionPos> loadedSections = geometryMap.loadedSections();
+            List<SectionPos> nearbySections = filterByDistance(
+                    loadedSections, cameraX, cameraY, cameraZ, maxDistanceBlocks, this::sectionBoundingSphere
+            );
             List<SectionPos> visibleSections = traversal.computeVisible(
-                    loadedSections, frustum, this::sectionBoundingSphere
+                    nearbySections, frustum, this::sectionBoundingSphere
             );
 
             // 6. Execute frame graph with visible sections

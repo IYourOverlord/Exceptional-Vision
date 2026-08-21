@@ -53,6 +53,7 @@ public final class EV {
             NeoForge.EVENT_BUS.addListener(this::onBlockBreak);
             NeoForge.EVENT_BUS.addListener(this::onBlockPlace);
             NeoForge.EVENT_BUS.addListener(this::onChunkLoad);
+            NeoForge.EVENT_BUS.addListener(this::onChunkUnload);
         }
     }
 
@@ -221,5 +222,44 @@ public final class EV {
         // LOD level 0 section containing this block coordinate
         SectionPos section = SectionPos.fromBlockCoord(0, pos.getX(), pos.getY(), pos.getZ());
         instance.dirtyTracker().markSectionDirty(section);
+    }
+
+    /**
+     * Evicts EV geometry for level-0 sections overlapping a chunk column that just left
+     * the client's loaded radius.
+     * <p>
+     * Without this, {@link dev.ev.render.scheduling.SectionGeometryMap} — which only ever
+     * gains entries via {@link EVInstance#renderFarLod} draining completed mesh results,
+     * and whose {@code remove(SectionPos)} method previously had no caller anywhere in
+     * production code — keeps every section ever meshed this session resident forever.
+     * Combined with {@link EVInstance#renderFarLod}'s traversal having no distance-from-player
+     * cutoff of its own (before this fix), stale far-away sections stayed valid
+     * frustum-test candidates indefinitely: after teleporting away (e.g. a {@code /kill}
+     * respawn), old sections could still geometrically intersect the new view frustum by
+     * direction alone and get drawn as huge, wrongly-placed cubes — the reported
+     * "flickering wall of textures" artifact. This handler and the distance cutoff in
+     * {@code renderFarLod} address the two independent causes together: this one bounds
+     * how long stale geometry can live at all, the other bounds how far away geometry is
+     * still eligible to draw even before it is evicted.
+     */
+    private void onChunkUnload(ChunkEvent.Unload event) {
+        if (instance == null) {
+            return;
+        }
+        if (!(event.getLevel() instanceof ClientLevel level)) {
+            return;
+        }
+
+        ChunkPos chunkPos = event.getChunk().getPos();
+        int minBlockX = chunkPos.getMinBlockX();
+        int minBlockZ = chunkPos.getMinBlockZ();
+        int minY = level.getMinBuildHeight();
+        int maxY = level.getMaxBuildHeight();
+        int sectionSize = 32; // level-0 section size, see SectionPos.sizeInBlocks()
+
+        for (int blockY = minY; blockY < maxY; blockY += sectionSize) {
+            SectionPos section = SectionPos.fromBlockCoord(0, minBlockX, blockY, minBlockZ);
+            instance.geometryMap().remove(section);
+        }
     }
 }
