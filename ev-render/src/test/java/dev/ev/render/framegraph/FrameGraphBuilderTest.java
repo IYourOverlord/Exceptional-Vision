@@ -282,6 +282,10 @@ class FrameGraphBuilderTest {
         }
 
         @Override
+        public void recordGauge(String name, long value) {
+        }
+
+        @Override
         public void recordImportStageStatus(ImportStageStatus status) {
         }
 

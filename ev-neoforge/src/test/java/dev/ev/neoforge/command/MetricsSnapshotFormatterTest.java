@@ -26,6 +26,7 @@ class MetricsSnapshotFormatterTest {
         assertTrue(result.contains("Cache Hit Rates:"));
         assertTrue(result.contains("GPU Pass Durations:"));
         assertTrue(result.contains("Counters:"));
+        assertTrue(result.contains("Gauges:"));
     }
 
     @Test
@@ -48,8 +49,12 @@ class MetricsSnapshotFormatterTest {
         counters.put("sections-loaded", 98765L);
         counters.put("buffers-uploaded", 1234L);
 
+        Map<String, Long> gauges = new LinkedHashMap<>();
+        gauges.put("visible-sections", 4321L);
+        gauges.put("loaded-sections", 999L);
+
         ImportStageStatus status = new ImportStageStatus(3200, 12, 554, 1234, 5000);
-        MetricsSnapshot snapshot = new MetricsSnapshot(queues, hitRates, durations, counters, status);
+        MetricsSnapshot snapshot = new MetricsSnapshot(queues, hitRates, durations, counters, gauges, status);
 
         String result = MetricsSnapshotFormatter.format(snapshot);
 
@@ -77,13 +82,21 @@ class MetricsSnapshotFormatterTest {
         assertTrue(result.contains("1234"));
         assertTrue(result.contains("56"));
         assertTrue(result.contains("98765"));
+
+        // Gauges section present with correct values, sorted (loaded-sections before visible-sections)
+        int loadedIdx = result.indexOf("loaded-sections");
+        int visibleIdx = result.indexOf("visible-sections");
+        assertTrue(loadedIdx >= 0 && visibleIdx >= 0, "both gauge entries should be present");
+        assertTrue(loadedIdx < visibleIdx, "loaded-sections should appear before visible-sections (alphabetical)");
+        assertTrue(result.contains("999"));
+        assertTrue(result.contains("4321"));
     }
 
     @Test
     @DisplayName("gpuPassDurationsNanos converts to milliseconds with reasonable precision")
     void testNanosToMs() {
         Map<String, Long> durations = Map.of("test-pass", 1_200_000L);
-        MetricsSnapshot snapshot = new MetricsSnapshot(Map.of(), Map.of(), durations, Map.of(),
+        MetricsSnapshot snapshot = new MetricsSnapshot(Map.of(), Map.of(), durations, Map.of(), Map.of(),
                 ImportStageStatus.empty());
 
         String result = MetricsSnapshotFormatter.format(snapshot);
@@ -94,7 +107,7 @@ class MetricsSnapshotFormatterTest {
     @DisplayName("cacheHitRates converts fraction to percentage")
     void testHitRatePercent() {
         Map<String, Double> hitRates = Map.of("section-cache", 0.873);
-        MetricsSnapshot snapshot = new MetricsSnapshot(Map.of(), hitRates, Map.of(), Map.of(),
+        MetricsSnapshot snapshot = new MetricsSnapshot(Map.of(), hitRates, Map.of(), Map.of(), Map.of(),
                 ImportStageStatus.empty());
 
         String result = MetricsSnapshotFormatter.format(snapshot);
@@ -106,7 +119,7 @@ class MetricsSnapshotFormatterTest {
     void testImportProgressFirst() {
         ImportStageStatus status = new ImportStageStatus(3200, 12, 554, 1234, 5000);
         MetricsSnapshot snapshot = new MetricsSnapshot(
-                Map.of("q", 1), Map.of(), Map.of(), Map.of(), status);
+                Map.of("q", 1), Map.of(), Map.of(), Map.of(), Map.of(), status);
 
         String result = MetricsSnapshotFormatter.format(snapshot);
 
@@ -131,7 +144,7 @@ class MetricsSnapshotFormatterTest {
     @DisplayName("Empty importStageStatus (totalKnown=0) shows 0.0%, not NaN or exception")
     void testEmptyImportStatus() {
         ImportStageStatus empty = ImportStageStatus.empty();
-        MetricsSnapshot snapshot = new MetricsSnapshot(Map.of(), Map.of(), Map.of(), Map.of(), empty);
+        MetricsSnapshot snapshot = new MetricsSnapshot(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), empty);
 
         String result = MetricsSnapshotFormatter.format(snapshot);
 

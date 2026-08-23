@@ -28,6 +28,11 @@ final class NoopMetricsRegistry implements MetricsRegistry {
     }
 
     @Override
+    public void recordGauge(String name, long value) {
+        // no-op
+    }
+
+    @Override
     public void recordImportStageStatus(ImportStageStatus status) {
         // no-op
     }

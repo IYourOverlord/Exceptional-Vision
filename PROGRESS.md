@@ -2353,3 +2353,109 @@ modelViewMatrix` и вся остальная camera-relative логика (`cam
 `javac`/сети до NeoForge maven в песочнице). Проверено вручную: баланс скобок файла, что
 `getModelViewMatrix()` определён на базовом `RenderLevelStageEvent` (не только на подклассах
 вроде `AfterSky`), что импорт `Minecraft` всё ещё используется в другом месте того же метода.
+
+### P0-profiling-checkpoint — sections 5-6, throughput/gauge fix + second profiling run (2026-08-23)
+
+**Контекст**: пользователь прислал скриншоты с far-LOD кубами внутри собственной render
+distance (не за её пределами, как задумано). Диагностика показала: `calculateNearCutoffBlocks`
+существовала и была покрыта тестом, но нигде не вызывалась — `filterByDistance` фильтровал
+только верхнюю границу. Добавлена нижняя граница `minDistanceBlocks` (margin=0 по решению
+пользователя), вычисляемая как `calculateNearCutoffBlocks(mc.options.renderDistance().get(), 0f)`.
+Обновлены 4 существующих юнит-теста под новую сигнатуру + добавлены 2 новых (секция полностью
+внутри границы → отброшена; секция на стыке → сохранена во избежание видимой дыры).
+
+**Подтверждено пользователем**: `BUILD SUCCESSFUL`, `./gradlew test` зелёный — значит и
+`mc.options.renderDistance().get()` компилируется на реальных 1.21.1/NeoForge 21.1.235
+мэппингах (в песочнице нет JDK/сети, чтобы это проверить самостоятельно).
+
+**Второй найденный баг** (в процессе того же обсуждения): `/ev debug` показывал
+`loaded-sections: 5191133` — физически невозможное число. Причина: `EVInstance.renderFarLod`
+каждый кадр вызывал `metricsRegistry.recordCounter("loaded-sections", loadedSections.size())` —
+`recordCounter` по контракту накапливает (`LongAdder.add(delta)`), а `.size()` — это текущее
+значение, не дельта; за минуты на 60 FPS сумма одного и того же числа даёт миллионы.
+
+**Фикс**: добавлен новый метод `MetricsRegistry.recordGauge(name, value)` — last-write-wins
+семантика (переиспользован существующий паттерн `LastValueLong`, тот же, что уже использовался
+для `recordGpuPassDuration`). `loaded-sections`/`visible-sections` в `EVInstance` переведены на
+`recordGauge`. Обновлены под новую сигнатуру интерфейса: `MetricsSnapshot` (+ поле `gauges`),
+обе `NoopMetricsRegistry` (ev-meshing, ev-storage), 2 inline-fake в тестах
+(`FrameGraphBuilderTest`, `SimpleTraversalTest`), все 5 вызовов конструктора `MetricsSnapshot` в
+`MetricsSnapshotFormatterTest`. `/ev debug` теперь печатает отдельную секцию `Gauges:`. Добавлен
+регрессионный тест `testGaugeIsLastWriteWinsNotAccumulated` в `DefaultMetricsRegistryTest`.
+
+**Подтверждено пользователем**: `BUILD SUCCESSFUL`, тесты зелёные повторно после этого фикса.
+
+**Живой прогон после обоих фиксов** (лог `1787500961750_latest.log`, 23 августа ~18:55–19:01):
+`/tp` дважды на непосещённые в сессии координаты (`20000,186,20000` и `20000,179,200000`).
+`Gauges` в этом прогоне стабильно в разумном диапазоне (`loaded-sections` 1488–2240,
+`visible-sections` 99–190) — подтверждает, что `recordGauge`-фикс работает на практике, не
+только в юнит-тестах. `Import Progress` монотонно растёт, `queued/building` всегда 0 к моменту
+снимка. Throughput посчитан по 12 интервалам между снимками: диапазон 0–225.9 сек/сек, сильно
+зависит от того, двигался ли игрок в этот момент (0 — вероятно, стоял на месте). Результаты
+внесены в `PROFILING_RESULTS.md` как новый append-only раздел "Второй прогон — 23 августа 2026".
+
+**Что тикет P0 всё ещё НЕ закрывает** (см. обновлённый раздел "Следующие шаги" в
+`PROFILING_RESULTS.md`): Time-to-first-frame не измерен вообще; Time-to-visually-complete
+получена только как верхняя граница (≤13.15с/≤11.93с), не точное значение — `/ev debug` был
+подан недостаточно быстро после `/tp`, чтобы поймать момент до завершения импорта; разбивка
+throughput по стадиям storage/meshing/GPU-upload/render не получена (`queuedForRead`/
+`activelyBuilding` были 0 в каждом снятом снимке — снимки не попадали в разгar активной
+обработки); весь Сценарий B (frame time, CPU/GPU breakdown, draw calls, overdraw) не затронут
+этими двумя прогонами. Чекбокс тикета в этом файле НЕ переведён в `[x]` — критерии приёмки
+всё ещё не закрыты полностью.
+
+### P0-profiling-checkpoint — Сценарий B первое измерение + секундомер на Time-to-visually-complete (2026-08-23, продолжение)
+
+Пользователь предоставил ручное секундомерное измерение Time-to-visually-complete (**~5–6
+секунд** после `/tp`) — первое реальное измерение этой метрики для чекпоинта, не только верхняя
+граница через `/ev debug` command-timing, как раньше. Неопределённость: лог содержал два `/tp`,
+не подтверждено, к какому именно относится замер — зафиксировано как открытый вопрос в
+`PROFILING_RESULTS.md`, не додумано.
+
+Пользователь также предоставил 3 F3-скриншота (Сценарий B, steady-state, не холодный старт) —
+неподвижно под водой (666 FPS/68% GPU), плавное движение (549 FPS/33% GPU), резкий разворот в
+падении (299 FPS/22% GPU) — плюс устные диапазоны FPS по памяти для ситуаций без скриншота.
+Внесено в `PROFILING_RESULTS.md` как новый раздел "Сценарий B — первое измерение", с явной
+пометкой, что три скриншота сняты в разных точках мира (не контролируемый A/B на одной сцене),
+поэтому корреляция FPS/GPU% не интерпретируется как причинно-следственная.
+
+Тикет по-прежнему не закрыт: CPU/GPU breakdown и draw call count требуют RenderDoc, ещё не
+использованного ни в одном прогоне. Time-to-first-frame (в отличие от Time-to-visually-complete)
+всё ещё не измерен ни разу. Чекбокс тикета остаётся `[ ]`.
+
+### P0-profiling-checkpoint — попытка RenderDoc-профилирования (2026-08-23, безуспешно)
+
+Пользователь установил RenderDoc v1.45 и попытался захватить кадр из игры для получения
+GPU/CPU breakdown и draw call count (Сценарий B тикета). Собрана полная командная строка запуска
+через `BootstrapLauncher` (module-path, add-opens/add-exports, JVM `-D` параметры,
+`--launchTarget forgeclientdev` и остальные program-аргументы) на основе фактических файлов
+`clientRunVmArgs.txt`/`clientRunProgramArgs.txt`/`clientLegacyClasspath.txt`, сгенерированных
+NeoGradle в `ev-neoforge\build\moddev\`.
+
+**Устойчивый краш**: при запуске через RenderDoc (`Launch Application`) процесс `javaw.exe`
+стабильно завершается сразу после `SpongePowered MIXIN Subsystem Version=0.8.7` (после успешной
+инициализации раннего EARLYDISPLAY-окна, `GL version 4.6`), без записи исключения ни в
+`latest.log`, ни в `debug.log`, и без `hs_err_pid*.log` (значит не JVM native crash). Точка
+падения не сдвинулась ни разу за 4 разные попытки:
+1. Без изменений — падение сразу после Mixin Subsystem.
+2. Добавлен `-Dfml.earlyprogresswindow=false` (сначала ошибочно в конец program-аргументов —
+   не подействовало, NeoForge проигнорировал как неизвестный program-аргумент; затем правильно
+   размещён среди `-D` параметров до main-класса — падение то же самое).
+3. Тот же флаг через `JAVA_TOOL_OPTIONS` (Environment Variables, Set Value) — падение то же.
+4. Отключены Allow Fullscreen/Allow VSync, включён Verify Buffer Access — падение то же.
+5. Inject через Remote Host Manager (сначала обычный запуск, потом запуск от администратора,
+   чтобы исключить конфликт привилегий с RenderDoc, запущенным от администратора) — RenderDoc
+   не обнаружил процесс `javaw.exe` в списке под `localhost` вообще, ни разу, даже когда игра
+   была полностью загружена в главном меню.
+
+**Не является причиной** (проверено и исключено): версия видеодрайвера NVIDIA — пользователь
+подтвердил, что уже стоит последняя версия.
+
+**Вывод**: похоже на более глубокую несовместимость RenderDoc v1.45 с конкретной связкой (раннее
+LWJGL/NeoForge EARLYDISPLAY GL 4.6 core-context + эта система), не диагностируемую дальше через
+переписку без прямого доступа к машине. **Решение**: отложить RenderDoc для этого чекпоинта,
+закрывать Сценарий B тем, что уже подтверждённо работает — F3-оверлей (см. предыдущую запись,
+раздел "Сценарий B — первое измерение") и JFR. Draw call count и точный per-pass GPU/CPU
+breakdown остаются TODO до тех пор, пока не будет найден рабочий способ GPU-профилирования
+(альтернативы для будущего рассмотрения, не опробованные: NVIDIA Nsight Graphics, PIX,
+`/ev profile` расширение на GPU-таймеры вместо RenderDoc).

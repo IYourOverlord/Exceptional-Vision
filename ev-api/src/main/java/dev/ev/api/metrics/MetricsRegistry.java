@@ -18,6 +18,16 @@ public interface MetricsRegistry {
 
     void recordCounter(String name, long delta);
 
+    /**
+     * Records the current value of a point-in-time metric (last-write-wins), as opposed to
+     * {@link #recordCounter}, which accumulates a running total across every call. Use this
+     * for anything that represents "how many right now" (e.g. currently loaded/visible
+     * section counts) rather than "how many events have happened so far" — calling
+     * {@link #recordCounter} every frame with a current size (rather than a delta since the
+     * last call) silently accumulates into a meaningless, ever-growing total.
+     */
+    void recordGauge(String name, long value);
+
     /** Updates the current staged import status (see ImportStageStatus). Called
      * periodically (not necessarily on every single task transition — batching
      * updates, e.g. once per tick, is acceptable and preferred to avoid overhead

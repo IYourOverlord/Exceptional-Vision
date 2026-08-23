@@ -57,6 +57,7 @@ public final class DefaultMetricsRegistry implements MetricsRegistry {
     private final ConcurrentHashMap<String, CacheAccessCounters> cacheAccess = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, LastValueLong> gpuPassDurationsNanos = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LastValueLong> gauges = new ConcurrentHashMap<>();
     private final AtomicReference<ImportStageStatus> importStageStatus =
             new AtomicReference<>(ImportStageStatus.empty());
 
@@ -81,6 +82,11 @@ public final class DefaultMetricsRegistry implements MetricsRegistry {
     }
 
     @Override
+    public void recordGauge(String name, long value) {
+        gauges.computeIfAbsent(name, k -> new LastValueLong()).set(value);
+    }
+
+    @Override
     public void recordImportStageStatus(ImportStageStatus status) {
         importStageStatus.set(java.util.Objects.requireNonNull(status, "status cannot be null"));
     }
@@ -99,11 +105,15 @@ public final class DefaultMetricsRegistry implements MetricsRegistry {
         Map<String, Long> countersCopy = new java.util.TreeMap<>();
         counters.forEach((k, v) -> countersCopy.put(k, v.sum()));
 
+        Map<String, Long> gaugesCopy = new java.util.TreeMap<>();
+        gauges.forEach((k, v) -> gaugesCopy.put(k, v.get()));
+
         return new MetricsSnapshot(
                 Map.copyOf(queueDepthsCopy),
                 Map.copyOf(cacheHitRatesCopy),
                 Map.copyOf(gpuPassDurationsCopy),
                 Map.copyOf(countersCopy),
+                Map.copyOf(gaugesCopy),
                 importStageStatus.get()
         );
     }

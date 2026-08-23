@@ -4,6 +4,8 @@ import dev.ev.api.SectionPos;
 import dev.ev.api.meshing.MeshingContext;
 import dev.ev.api.meshing.MeshletBatch;
 import dev.ev.api.meshing.Quad;
+import dev.ev.api.metrics.ImportStageStatus;
+import dev.ev.api.metrics.MetricsRegistry;
 import dev.ev.api.storage.WorldSectionHandle;
 import dev.ev.meshing.queue.MeshTaskQueue;
 import dev.ev.render.dirty.GeometryChangeDeduplicator;
@@ -19,6 +21,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages the worker thread pool that drains {@link MeshTaskQueue}, runs each task
@@ -44,6 +48,25 @@ public final class MeshWorkerPool implements AutoCloseable {
     private final MeshingPipelineRunner pipelineRunner;
     private final GeometryChangeDeduplicator deduplicator;
     private final MeshingContext meshingContext;
+    private final MetricsRegistry metrics;
+
+    /**
+     * Tracks how many sections have ever been submitted to this pool (across its whole
+     * lifetime, not just currently in flight) — this is {@code ImportStageStatus.totalKnown()}.
+     * Incremented once per {@code processTask} call, i.e. once per dequeue, not once per
+     * {@code submit} — {@code MeshTaskQueue} does not currently expose a submit-time hook,
+     * so "known" here means "the worker pool has seen and started processing it", which is
+     * an accepted approximation for the P0 profiling checkpoint's throughput metric: it
+     * slightly understates totalKnown while a large cold-start batch is still queued and not
+     * yet dequeued, but never overstates it.
+     */
+    private final AtomicLong totalKnown = new AtomicLong();
+
+    /** Sections currently inside {@code processTask} (mesh pipeline running), for {@code ImportStageStatus.activelyBuilding()}. */
+    private final AtomicInteger activelyBuilding = new AtomicInteger();
+
+    /** Sections that finished {@code processTask} without throwing, for {@code ImportStageStatus.completed()} — counts both accepted and deduplicated-away results, since both represent finished work, not backlog. */
+    private final AtomicLong completed = new AtomicLong();
 
     /**
      * Creates and immediately starts worker threads.
@@ -54,18 +77,22 @@ public final class MeshWorkerPool implements AutoCloseable {
      * @param pipelineRunner  full meshing pipeline
      * @param deduplicator    deduplication check before accepting result
      * @param meshingContext  MeshingContext used for all tasks
+     * @param metrics         sink for {@link ImportStageStatus} reporting (P0 profiling checkpoint's
+     *                        throughput/stage-breakdown metric); must not be null
      */
     public MeshWorkerPool(int workerCount,
                           MeshTaskQueue<MeshTask> taskQueue,
                           SectionCache sectionCache,
                           MeshingPipelineRunner pipelineRunner,
                           GeometryChangeDeduplicator deduplicator,
-                          MeshingContext meshingContext) {
+                          MeshingContext meshingContext,
+                          MetricsRegistry metrics) {
         this.taskQueue = Objects.requireNonNull(taskQueue);
         this.sectionCache = Objects.requireNonNull(sectionCache);
         this.pipelineRunner = Objects.requireNonNull(pipelineRunner);
         this.deduplicator = Objects.requireNonNull(deduplicator);
         this.meshingContext = Objects.requireNonNull(meshingContext);
+        this.metrics = Objects.requireNonNull(metrics, "metrics cannot be null");
 
         this.executor = Executors.newFixedThreadPool(workerCount, r -> {
             Thread t = new Thread(r, "ev-mesh-worker");
@@ -101,6 +128,8 @@ public final class MeshWorkerPool implements AutoCloseable {
 
     private void processTask(MeshTask task) {
         SectionPos pos = task.section();
+        totalKnown.incrementAndGet();
+        activelyBuilding.incrementAndGet();
         WorldSectionHandle handle = null;
         try {
             handle = sectionCache.acquire(pos.encode(), true);
@@ -121,10 +150,35 @@ public final class MeshWorkerPool implements AutoCloseable {
         } catch (Exception e) {
             LOGGER.warn("Meshing failed for section {}", pos, e);
         } finally {
+            activelyBuilding.decrementAndGet();
+            completed.incrementAndGet();
+            reportImportStageStatus();
             if (handle != null) {
                 handle.release();
             }
         }
+    }
+
+    /**
+     * Reports the current {@link ImportStageStatus} snapshot to {@link #metrics}. Called once
+     * per finished task (success or failure) rather than throttled to a fixed interval like
+     * {@code MeshTaskQueue}'s queue-depth reporting — {@code ImportStageStatus} construction here
+     * is a handful of volatile reads, not a lock acquisition, so per-task overhead is negligible
+     * compared to the meshing work itself (see {@code GreedyMeshStage}, which dominates
+     * meshing-thread CPU time per {@code PROFILING_RESULTS.md}).
+     * <p>
+     * {@code retryingAfterFailure} is always reported as 0: this MVP worker pool has no retry
+     * logic (a failed task, see the catch block above, is logged and dropped, not requeued) — 0 is
+     * a factual statement about current architecture, not a placeholder pending a future feature.
+     */
+    private void reportImportStageStatus() {
+        metrics.recordImportStageStatus(new ImportStageStatus(
+                taskQueue.size(),
+                0, // retryingAfterFailure — no retry path exists in this MVP worker pool
+                activelyBuilding.get(),
+                (int) Math.min(completed.get(), Integer.MAX_VALUE),
+                (int) Math.min(totalKnown.get(), Integer.MAX_VALUE)
+        ));
     }
 
     /**

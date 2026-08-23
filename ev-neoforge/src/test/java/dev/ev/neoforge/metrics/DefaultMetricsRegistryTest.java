@@ -79,6 +79,22 @@ class DefaultMetricsRegistryTest {
     }
 
     @Test
+    @DisplayName("recordGauge is last-write-wins, NOT accumulated (unlike recordCounter) — "
+            + "regression test for the loaded-sections/visible-sections bug where calling "
+            + "recordCounter with a current size every frame silently summed into millions")
+    void testGaugeIsLastWriteWinsNotAccumulated() {
+        DefaultMetricsRegistry registry = new DefaultMetricsRegistry();
+        registry.recordGauge("visible-sections", 100);
+        registry.recordGauge("visible-sections", 250);
+        registry.recordGauge("loaded-sections", 9000);
+
+        MetricsSnapshot snapshot = registry.snapshot();
+        assertEquals(250L, snapshot.gauges().get("visible-sections"),
+                "gauge must reflect only the most recent value, not a sum (100 + 250 = 350 would be wrong)");
+        assertEquals(9000L, snapshot.gauges().get("loaded-sections"));
+    }
+
+    @Test
     @DisplayName("recordImportStageStatus replaces the tracked status wholesale")
     void testImportStageStatusReplaced() {
         DefaultMetricsRegistry registry = new DefaultMetricsRegistry();

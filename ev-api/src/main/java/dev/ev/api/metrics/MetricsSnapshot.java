@@ -11,9 +11,10 @@ public record MetricsSnapshot(
     Map<String, Double> cacheHitRates,
     Map<String, Long> gpuPassDurationsNanos,
     Map<String, Long> counters,
+    Map<String, Long> gauges,
     ImportStageStatus importStageStatus
 ) {
     public static MetricsSnapshot empty() {
-        return new MetricsSnapshot(Map.of(), Map.of(), Map.of(), Map.of(), ImportStageStatus.empty());
+        return new MetricsSnapshot(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), ImportStageStatus.empty());
     }
 }

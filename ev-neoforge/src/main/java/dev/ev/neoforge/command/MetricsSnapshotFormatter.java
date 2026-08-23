@@ -48,6 +48,12 @@ public final class MetricsSnapshotFormatter {
         sb.append("Counters:\n");
         formatLongMap(sb, snapshot.counters());
 
+        // Gauges (point-in-time values, e.g. currently loaded/visible section counts —
+        // see MetricsRegistry.recordGauge's Javadoc for why these are kept separate from
+        // Counters instead of accumulating into them)
+        sb.append("Gauges:\n");
+        formatLongMap(sb, snapshot.gauges());
+
         return sb.toString();
     }
 

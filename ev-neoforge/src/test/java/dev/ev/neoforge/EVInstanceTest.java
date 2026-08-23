@@ -58,7 +58,7 @@ class EVInstanceTest {
         List<dev.ev.api.SectionPos> loaded = List.of(near, far);
 
         List<dev.ev.api.SectionPos> result = EVInstance.filterByDistance(
-                loaded, 0f, 0f, 0f, 500f, pos -> fixedRadiusBounds(pos, 10f)
+                loaded, 0f, 0f, 0f, 0f, 500f, pos -> fixedRadiusBounds(pos, 10f)
         );
 
         assertTrue(result.contains(near), "section within budget must be kept");
@@ -76,7 +76,7 @@ class EVInstanceTest {
 
         // Camera back at world spawn after /kill.
         List<dev.ev.api.SectionPos> result = EVInstance.filterByDistance(
-                loaded, 0f, 64f, 0f, 4096f, pos -> fixedRadiusBounds(pos, 16f)
+                loaded, 0f, 64f, 0f, 0f, 4096f, pos -> fixedRadiusBounds(pos, 16f)
         );
 
         assertTrue(result.isEmpty(),
@@ -95,7 +95,7 @@ class EVInstanceTest {
         List<dev.ev.api.SectionPos> loaded = List.of(pos);
 
         List<dev.ev.api.SectionPos> result = EVInstance.filterByDistance(
-                loaded, 0f, 0f, 0f, maxDistanceBlocks, p -> fixedRadiusBounds(p, 10f)
+                loaded, 0f, 0f, 0f, 0f, maxDistanceBlocks, p -> fixedRadiusBounds(p, 10f)
         );
 
         assertEquals(1, result.size(),
@@ -106,7 +106,7 @@ class EVInstanceTest {
     @DisplayName("filterByDistance preserves relative order and passes through an empty list")
     void testFilterByDistanceOrderAndEmpty() {
         assertTrue(EVInstance.filterByDistance(
-                List.of(), 0f, 0f, 0f, 100f, p -> fixedRadiusBounds(p, 1f)
+                List.of(), 0f, 0f, 0f, 0f, 100f, p -> fixedRadiusBounds(p, 1f)
         ).isEmpty());
 
         dev.ev.api.SectionPos a = new dev.ev.api.SectionPos(0, 1, 0, 0);
@@ -114,10 +114,47 @@ class EVInstanceTest {
         List<dev.ev.api.SectionPos> loaded = List.of(a, b);
 
         List<dev.ev.api.SectionPos> result = EVInstance.filterByDistance(
-                loaded, 0f, 0f, 0f, 10000f, p -> fixedRadiusBounds(p, 1f)
+                loaded, 0f, 0f, 0f, 0f, 10000f, p -> fixedRadiusBounds(p, 1f)
         );
 
         assertEquals(List.of(a, b), result);
+    }
+
+    @Test
+    @DisplayName("filterByDistance drops a section entirely inside minDistanceBlocks "
+            + "(reproduces LOD cubes covering the player's own vanilla render distance)")
+    void testFilterByDistanceDropsSectionInsideVanillaZone() {
+        // Section centered 50 blocks away with a 10-block radius (so it spans 40..60) —
+        // entirely inside a 100-block vanilla render-distance cutoff.
+        dev.ev.api.SectionPos closeSection = new dev.ev.api.SectionPos(0, 0, 0, 0);
+        List<dev.ev.api.SectionPos> loaded = List.of(closeSection);
+
+        List<dev.ev.api.SectionPos> result = EVInstance.filterByDistance(
+                loaded, 50f, 0f, 0f, 100f, 5000f,
+                pos -> new float[]{0f, 0f, 0f, 10f}
+        );
+
+        assertTrue(result.isEmpty(),
+                "a section entirely within minDistanceBlocks of the camera must not be a "
+                        + "far-LOD draw candidate — vanilla already renders that area");
+    }
+
+    @Test
+    @DisplayName("filterByDistance keeps a section straddling minDistanceBlocks "
+            + "(no visible gap at the vanilla/far-LOD boundary)")
+    void testFilterByDistanceKeepsSectionStraddlingInnerBoundary() {
+        // Section center at distance 100 with radius 10 (spans 90..110): straddles a
+        // minDistanceBlocks of 100, so it must still be drawn to avoid a gap.
+        dev.ev.api.SectionPos straddling = new dev.ev.api.SectionPos(0, 0, 0, 0);
+        List<dev.ev.api.SectionPos> loaded = List.of(straddling);
+
+        List<dev.ev.api.SectionPos> result = EVInstance.filterByDistance(
+                loaded, 100f, 0f, 0f, 100f, 5000f,
+                pos -> new float[]{0f, 0f, 0f, 10f}
+        );
+
+        assertEquals(1, result.size(),
+                "a section straddling the inner cutoff must be kept to avoid a rendering gap");
     }
 
     @Test

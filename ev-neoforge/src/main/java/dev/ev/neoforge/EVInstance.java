@@ -106,7 +106,8 @@ public final class EVInstance implements AutoCloseable {
                 sectionCache,
                 pipelineRunner,
                 deduplicator,
-                SimpleMeshingContext.INSTANCE
+                SimpleMeshingContext.INSTANCE,
+                metricsRegistry
         );
 
         // Dirty tracking & scheduling
@@ -187,31 +188,35 @@ public final class EVInstance implements AutoCloseable {
     }
 
     /**
-     * Filters a list of loaded sections down to only those within
-     * {@code maxDistanceBlocks} of the camera, measured center-to-camera against each
-     * section's own bounding sphere (so a large/high-LOD section isn't dropped just
-     * because its center sits slightly past the cutoff while part of its volume is
-     * still within budget — the comparison uses {@code maxDistanceBlocks + radius}).
+     * Keeps only sections whose bounding sphere lies within {@code [minDistanceBlocks, maxDistanceBlocks]}
+     * of the camera.
+     * <p>
+     * The lower bound exists because EV's far-LOD pass is only meant to cover the area
+     * <em>beyond</em> vanilla's own chunk rendering — see {@link #calculateNearCutoffBlocks}.
+     * Without it, every loaded section (including ones vanilla is already rendering right next
+     * to the player) is a far-LOD draw candidate, which is exactly the "LOD cubes covering my
+     * own render distance, right in front of my face" symptom: the unit-cube placeholder
+     * geometry (see {@link FarLodPassRenderer}) is large relative to a single section, so at
+     * close range it fills the screen instead of appearing only past the horizon.
      * <p>
      * Exists as a standalone static/pure function (no field access, only the passed-in
-     * {@code sectionBounds} function) specifically so this filtering logic — the fix for
-     * stale, far-away sections geometrically intersecting the current view frustum by
-     * direction alone after a long-distance teleport (see {@link #renderFarLod}'s
-     * "Distance-based cutoff" step) — is unit-testable without a GL context or a live
-     * {@link Minecraft} instance.
+     * {@code sectionBounds} function) so this filtering logic is unit-testable without a GL
+     * context or a live {@link Minecraft} instance.
      *
-     * @param loadedSections   every section currently resident, non-null
-     * @param cameraX          camera world X
-     * @param cameraY          camera world Y
-     * @param cameraZ          camera world Z
-     * @param maxDistanceBlocks non-negative distance budget in blocks (see {@code
-     *                          EVConfig.maxRenderDistanceBlocks()})
-     * @param sectionBounds    world-space bounding sphere [x, y, z, radius] for a SectionPos
+     * @param loadedSections    every section currently resident, non-null
+     * @param cameraX           camera world X
+     * @param cameraY           camera world Y
+     * @param cameraZ           camera world Z
+     * @param minDistanceBlocks inclusive lower bound; sections closer than this are skipped
+     *                          (vanilla's own rendering already covers them)
+     * @param maxDistanceBlocks inclusive upper bound; sections farther than this are skipped
+     * @param sectionBounds     world-space bounding sphere [x, y, z, radius] for a SectionPos
      * @return sections within budget, in the same relative order as {@code loadedSections}
      */
     static List<SectionPos> filterByDistance(
             List<SectionPos> loadedSections,
             float cameraX, float cameraY, float cameraZ,
+            float minDistanceBlocks,
             float maxDistanceBlocks,
             java.util.function.Function<SectionPos, float[]> sectionBounds
     ) {
@@ -222,8 +227,14 @@ public final class EVInstance implements AutoCloseable {
             float dy = bounds[1] - cameraY;
             float dz = bounds[2] - cameraZ;
             float distSq = dx * dx + dy * dy + dz * dz;
-            float cutoff = maxDistanceBlocks + bounds[3];
-            if (distSq <= cutoff * cutoff) {
+            float outerCutoff = maxDistanceBlocks + bounds[3];
+            // Inner cutoff: subtract the section's own bounding radius (bounds[3]) rather than
+            // add it, so a section is only excluded once it is ENTIRELY inside the vanilla zone
+            // — a section straddling the boundary still gets drawn, avoiding a gap. Clamped to
+            // 0 so a tiny/negative minDistanceBlocks (e.g. render distance 0) never excludes
+            // everything.
+            float innerCutoff = Math.max(0f, minDistanceBlocks - bounds[3]);
+            if (distSq <= outerCutoff * outerCutoff && distSq >= innerCutoff * innerCutoff) {
                 nearbySections.add(pos);
             }
         }
@@ -325,9 +336,21 @@ public final class EVInstance implements AutoCloseable {
             // distance knob) keeps a single source of truth for how far EV is supposed
             // to draw.
             float maxDistanceBlocks = config.maxRenderDistanceBlocks();
+            // marginChunks = 0: sections are excluded exactly at vanilla's own render-distance
+            // boundary, with no extra buffer — see calculateNearCutoffBlocks's Javadoc for why
+            // sqrt(2) alone (covering the square loading zone's diagonal) is used as the margin.
+            //
+            // mc.options.renderDistance().get() — confirmed compiling and passing tests
+            // against the real 1.21.1/NeoForge 21.1.235 mappings (BUILD SUCCESSFUL, all
+            // tests green). Compilation alone does not prove the runtime value is correct
+            // in-game (e.g. that it reflects live changes if the player edits render
+            // distance mid-session) — that still needs the in-game check below.
+            int vanillaRenderDistanceChunks = mc.options.renderDistance().get();
+            float minDistanceBlocks = calculateNearCutoffBlocks(vanillaRenderDistanceChunks, 0.0f);
             List<SectionPos> loadedSections = geometryMap.loadedSections();
             List<SectionPos> nearbySections = filterByDistance(
-                    loadedSections, cameraX, cameraY, cameraZ, maxDistanceBlocks, this::sectionBoundingSphere
+                    loadedSections, cameraX, cameraY, cameraZ,
+                    minDistanceBlocks, maxDistanceBlocks, this::sectionBoundingSphere
             );
             // Camera-relative bounding spheres for both the frustum test and the GPU
             // upload below — see the coordinate-space note above. mvp already expects
@@ -369,8 +392,8 @@ public final class EVInstance implements AutoCloseable {
                             commands, visibleSections, cameraRelativeBounds,
                             viewProjColumnMajor);
 
-                    metricsRegistry.recordCounter("visible-sections", visibleSections.size());
-                    metricsRegistry.recordCounter("loaded-sections", loadedSections.size());
+                    metricsRegistry.recordGauge("visible-sections", visibleSections.size());
+                    metricsRegistry.recordGauge("loaded-sections", loadedSections.size());
                 }
 
                 @Override
