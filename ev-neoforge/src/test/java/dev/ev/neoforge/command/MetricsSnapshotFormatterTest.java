@@ -53,7 +53,7 @@ class MetricsSnapshotFormatterTest {
         gauges.put("visible-sections", 4321L);
         gauges.put("loaded-sections", 999L);
 
-        ImportStageStatus status = new ImportStageStatus(3200, 12, 554, 1234, 5000);
+        ImportStageStatus status = new ImportStageStatus(1000, 4, 1200, 500, 1000, 50, 12, 1234, 5000);
         MetricsSnapshot snapshot = new MetricsSnapshot(queues, hitRates, durations, counters, gauges, status);
 
         String result = MetricsSnapshotFormatter.format(snapshot);
@@ -117,7 +117,7 @@ class MetricsSnapshotFormatterTest {
     @Test
     @DisplayName("Non-empty importStageStatus appears FIRST with correct percentage and all stage numbers")
     void testImportProgressFirst() {
-        ImportStageStatus status = new ImportStageStatus(3200, 12, 554, 1234, 5000);
+        ImportStageStatus status = new ImportStageStatus(1000, 4, 1200, 500, 1000, 50, 12, 1234, 5000);
         MetricsSnapshot snapshot = new MetricsSnapshot(
                 Map.of("q", 1), Map.of(), Map.of(), Map.of(), Map.of(), status);
 
@@ -133,11 +133,11 @@ class MetricsSnapshotFormatterTest {
         assertTrue(result.contains("1234/5000"), "Should show completed/totalKnown");
         assertTrue(result.contains("24.7%"), "Should show 24.7%, got: " + result);
 
-        // All four stage numbers
-        assertTrue(result.contains("queued: 3200"));
-        assertTrue(result.contains("retrying: 12"));
-        assertTrue(result.contains("building: 554"));
-        assertTrue(result.contains("done: 1234"));
+        // All substages present
+        assertTrue(result.contains("storage: 1000 queued, 4 active"));
+        assertTrue(result.contains("meshing: 1200 queued, 500 active"));
+        assertTrue(result.contains("upload:  1000 queued, 50 active"));
+        assertTrue(result.contains("errors:  12 retrying"));
     }
 
     @Test

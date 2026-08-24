@@ -98,11 +98,11 @@ class DefaultMetricsRegistryTest {
     @DisplayName("recordImportStageStatus replaces the tracked status wholesale")
     void testImportStageStatusReplaced() {
         DefaultMetricsRegistry registry = new DefaultMetricsRegistry();
-        registry.recordImportStageStatus(new ImportStageStatus(1, 2, 3, 4, 10));
-        assertEquals(new ImportStageStatus(1, 2, 3, 4, 10), registry.snapshot().importStageStatus());
+        registry.recordImportStageStatus(new ImportStageStatus(1, 1, 2, 2, 3, 3, 4, 10, 20));
+        assertEquals(new ImportStageStatus(1, 1, 2, 2, 3, 3, 4, 10, 20), registry.snapshot().importStageStatus());
 
-        registry.recordImportStageStatus(new ImportStageStatus(0, 0, 0, 10, 10));
-        assertEquals(new ImportStageStatus(0, 0, 0, 10, 10), registry.snapshot().importStageStatus());
+        registry.recordImportStageStatus(new ImportStageStatus(0, 0, 0, 0, 0, 0, 0, 10, 10));
+        assertEquals(new ImportStageStatus(0, 0, 0, 0, 0, 0, 0, 10, 10), registry.snapshot().importStageStatus());
     }
 
     @Test

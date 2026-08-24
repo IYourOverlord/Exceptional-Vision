@@ -17,14 +17,18 @@ package dev.ev.api.metrics;
  * an explicit per-stage breakdown.
  */
 public record ImportStageStatus(
-    int queuedForRead,
+    int queuedForStorage,
+    int activelyLoadingStorage,
+    int queuedForMeshing,
+    int activelyMeshing,
+    int queuedForGpuUpload,
+    int activelyUploading,
     int retryingAfterFailure,
-    int activelyBuilding,
     int completed,
     int totalKnown
 ) {
     public static ImportStageStatus empty() {
-        return new ImportStageStatus(0, 0, 0, 0, 0);
+        return new ImportStageStatus(0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     /** Fraction complete in [0,1], or 0.0 if totalKnown is 0 (nothing to report yet, not division-by-zero garbage). */

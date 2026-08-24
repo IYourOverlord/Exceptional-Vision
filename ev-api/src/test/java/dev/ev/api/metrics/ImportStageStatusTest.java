@@ -10,7 +10,7 @@ class ImportStageStatusTest {
 
     @Test
     void completionFractionIsZeroWhenTotalKnownIsZero() {
-        ImportStageStatus status = new ImportStageStatus(0, 0, 0, 0, 0);
+        ImportStageStatus status = new ImportStageStatus(0, 0, 0, 0, 0, 0, 0, 0, 0);
         double fraction = status.completionFraction();
         assertEquals(0.0, fraction);
         assertFalse(Double.isNaN(fraction), "completionFraction() must not be NaN when totalKnown is 0");
@@ -18,7 +18,7 @@ class ImportStageStatusTest {
 
     @Test
     void completionFractionComputesRatio() {
-        ImportStageStatus status = new ImportStageStatus(10, 2, 5, 50, 200);
+        ImportStageStatus status = new ImportStageStatus(10, 2, 5, 20, 10, 5, 8, 50, 200);
         assertEquals(0.25, status.completionFraction(), 1e-9);
     }
 
@@ -29,7 +29,7 @@ class ImportStageStatusTest {
 
     @Test
     void completionFractionAtFullCompletion() {
-        ImportStageStatus status = new ImportStageStatus(0, 0, 0, 100, 100);
+        ImportStageStatus status = new ImportStageStatus(0, 0, 0, 0, 0, 0, 0, 100, 100);
         assertEquals(1.0, status.completionFraction(), 1e-9);
     }
 }

@@ -61,9 +61,14 @@ public final class MetricsSnapshotFormatter {
         double pct = status.completionFraction() * 100.0;
         sb.append(String.format(Locale.US, "Import Progress: %d/%d (%.1f%%)\n",
                 status.completed(), status.totalKnown(), pct));
-        sb.append(String.format(Locale.US, "  queued: %d  retrying: %d  building: %d  done: %d\n",
-                status.queuedForRead(), status.retryingAfterFailure(),
-                status.activelyBuilding(), status.completed()));
+        sb.append(String.format(Locale.US, "  storage: %d queued, %d active\n",
+                status.queuedForStorage(), status.activelyLoadingStorage()));
+        sb.append(String.format(Locale.US, "  meshing: %d queued, %d active\n",
+                status.queuedForMeshing(), status.activelyMeshing()));
+        sb.append(String.format(Locale.US, "  upload:  %d queued, %d active\n",
+                status.queuedForGpuUpload(), status.activelyUploading()));
+        sb.append(String.format(Locale.US, "  errors:  %d retrying\n",
+                status.retryingAfterFailure()));
     }
 
     private static void formatIntMap(StringBuilder sb, Map<String, Integer> map) {

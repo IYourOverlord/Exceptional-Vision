@@ -2459,3 +2459,13 @@ LWJGL/NeoForge EARLYDISPLAY GL 4.6 core-context + эта система), не �
 breakdown остаются TODO до тех пор, пока не будет найден рабочий способ GPU-профилирования
 (альтернативы для будущего рассмотрения, не опробованные: NVIDIA Nsight Graphics, PIX,
 `/ev profile` расширение на GPU-таймеры вместо RenderDoc).
+
+### P0-profiling-checkpoint — Реализация детальной разбивки стадий в ImportStageStatus (2026-08-24)
+
+Внедрены изменения для обеспечения разбивки стадий конвейера холодного старта (п.4 Сценария A):
+- Запись `ImportStageStatus` расширена до 9 полей, детально отражающих очереди и активные задачи для каждой под-стадии: `queuedForStorage` / `activelyLoadingStorage`, `queuedForMeshing` / `activelyMeshing`, `queuedForGpuUpload` / `activelyUploading`, `retryingAfterFailure`, `completed` и `totalKnown`.
+- Обновлен вывод `MetricsSnapshotFormatter` для корректного отображения расширенного состояния конвейера в чате/логах при вызове `/ev debug` (все соответствующие unit-тесты переписаны и проверены).
+- В `MeshWorkerPool` интегрирована передача размера очереди и количества активных потоков мешинга в обновленные поля `queuedForMeshing` и `activelyMeshing`.
+- В `DefaultMetricsRegistryTest` исправлены вызовы конструкторов `ImportStageStatus` для соответствия новому билд-контракту.
+- Все тесты во всех модулях проходят успешно (`BUILD SUCCESSFUL`). Код подготовлен для точных замеров распределения времени и очередей при холодном старте.
+

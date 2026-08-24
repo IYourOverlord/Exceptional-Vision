@@ -173,9 +173,13 @@ public final class MeshWorkerPool implements AutoCloseable {
      */
     private void reportImportStageStatus() {
         metrics.recordImportStageStatus(new ImportStageStatus(
-                taskQueue.size(),
+                0, // queuedForStorage - currently sync loaded inside meshing
+                0, // activelyLoadingStorage
+                taskQueue.size(), // queuedForMeshing
+                activelyBuilding.get(), // activelyMeshing
+                0, // queuedForGpuUpload - tracked externally if needed
+                0, // activelyUploading
                 0, // retryingAfterFailure — no retry path exists in this MVP worker pool
-                activelyBuilding.get(),
                 (int) Math.min(completed.get(), Integer.MAX_VALUE),
                 (int) Math.min(totalKnown.get(), Integer.MAX_VALUE)
         ));
