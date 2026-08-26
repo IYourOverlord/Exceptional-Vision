@@ -42,7 +42,7 @@
 - [x] **31-integration-checklist-mvp** — Сборка и проверка MVP
 
 ### Этап 4: Профилирование (Чекпоинт P0)
-- [ ] **P0-profiling-checkpoint** — Замеры холодного старта, FPS и задержек
+- [ ] **tickets/P0-profiling-checkpoint.md** — Замеры холодного старта, FPS и задержек
 
 ### Этап 5: Волна 2 — Оптимизации (Opt-in)
 - [ ] **08-storage-section-cache-opt** — Шардированный кэш
